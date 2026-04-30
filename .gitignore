@@ -1,0 +1,15 @@
+# Runtime output written by MonitorTracking.py
+Webcam3DTracker/screen_position.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp

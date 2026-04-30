@@ -19,8 +19,8 @@ filter_length = 10
 gaze_length = 350
 
 # --- Orbit camera state for the debug view ---
-orbit_yaw   = -151.0          # radians, left/right
-orbit_pitch = 00.0          # radians, up/down
+orbit_yaw   = 0.0          # radians, left/right
+orbit_pitch = 0.0          # radians, up/down
 orbit_radius = 1500.0       # distance from head center
 orbit_fov_deg = 50.0       # horizontal FOV for projection
 
@@ -81,12 +81,15 @@ nose_indices = [4, 45, 275, 220, 440, 1, 5, 51, 281, 44, 274, 241,
                 3, 248]
 
 # ===== NEW: File writing for screen position =====
-screen_position_file = "C:/Storage/Google Drive/Software/EyeTracker3DPython/screen_position.txt"
+screen_position_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screen_position.txt")
 
 def write_screen_position(x, y):
     """Write screen position to file, overwriting the same line"""
-    with open(screen_position_file, 'w') as f:
-        f.write(f"{x},{y}\n")
+    try:
+        with open(screen_position_file, 'w') as f:
+            f.write(f"{x},{y}\n")
+    except OSError:
+        pass
 
 def _rot_x(a):
     ca, sa = math.cos(a), math.sin(a)
@@ -403,8 +406,8 @@ def convert_gaze_to_screen_coordinates(combined_gaze_direction, calibration_offs
 
     
     # Specify degrees at which screen border will be reached
-    yawDegrees = 5 * 3  # x degrees left or right
-    pitchDegrees = 2.0 * 2.5  # x degrees up or down
+    yawDegrees = 25.0  # x degrees left or right (full screen width span)
+    pitchDegrees = 15.0  # x degrees up or down (full screen height span)
 
     # Apply calibration offsets
     yaw_deg += calibration_offset_yaw
