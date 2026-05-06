@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webcam Eye Tracker — Number Grid</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="start-screen">
+    <h1>Webcam Eye Tracker</h1>
+    <p>Look at any number 1&ndash;40 with your eyes. The dot will follow.</p>
+    <button id="start-button">Start tracking</button>
+    <p class="hint">You'll see brief instructions next, then a 14-second calibration.</p>
+  </div>
+
+  <div id="instructions-screen" class="hidden">
+    <div class="instructions-card">
+      <h2>How it works</h2>
+      <ol>
+        <li>
+          <strong>Grant camera access.</strong> When you click <em>Start tracking</em> below,
+          your browser will ask for permission. Your video never leaves your device.
+        </li>
+        <li>
+          <strong>Sit comfortably about an arm's length away</strong> from your screen,
+          with even lighting on your face. Avoid backlight from a window.
+        </li>
+        <li>
+          <strong>Calibrate (~14 seconds).</strong> A yellow-pulsing number will appear.
+          Look directly at it and hold your gaze. After 1.5 seconds the next one lights up.
+          The walkthrough visits 9 numbers spread across the grid.
+        </li>
+        <li>
+          <strong>Track.</strong> A green dot follows your gaze and the number cell you're
+          looking at lights up green.
+        </li>
+        <li>
+          <strong>Refine on the fly.</strong> If the dot is off (e.g. it shows 21 but you're
+          really looking at 5), <em>click the correct number</em>. The model learns from
+          each click and gets better over time.
+        </li>
+        <li>
+          <strong>Keyboard:</strong> press <kbd>Esc</kbd> any time to stop.
+        </li>
+      </ol>
+      <p class="instructions-note">
+        Tip: cell <strong>8</strong> shows your live webcam preview so you can check your
+        framing.
+      </p>
+      <button id="instructions-start-button">Start tracking</button>
+    </div>
+  </div>
+
+  <div id="banner" class="hidden"></div>
+
+  <div id="grid" class="hidden"></div>
+
+  <canvas id="overlay" class="hidden"></canvas>
+
+  <button id="recalibrate-button" class="hidden" title="Wipe saved calibration and redo the 9-point walkthrough">&#x21bb; Recalibrate</button>
+
+  <video id="video" autoplay playsinline muted></video>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

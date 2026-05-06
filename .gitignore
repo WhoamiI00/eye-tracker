@@ -13,3 +13,13 @@ env/
 .vscode/
 .idea/
 *.swp
+
+# Claude Code local state
+.claude/
+
+# Webcam3DTracker runtime artifacts (recorded sessions, downloaded models)
+Webcam3DTracker/sessions/
+Webcam3DTracker/models/
+
+# Vercel link state (per-machine)
+.vercel/
