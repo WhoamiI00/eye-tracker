@@ -1,0 +1,9 @@
+# EyeMouse depends on the same core stack as GazeOverlay.
+# Install GazeOverlay/requirements.txt first OR use this list directly.
+opencv-python==4.10.0.84
+mediapipe==0.10.14
+numpy>=1.26,<2.0
+scipy>=1.11
+pyautogui>=0.9.54
+keyboard>=0.13.5
+PyQt6>=6.6
