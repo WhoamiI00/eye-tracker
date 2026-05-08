@@ -31,8 +31,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Copy HOTKEYS.txt next to the .exe so users have a cheat sheet
+if exist HOTKEYS.txt copy /Y HOTKEYS.txt dist\HOTKEYS.txt >nul
+
 echo.
 echo ===============================================
 echo   Build complete:  dist\GazeOverlay.exe
+echo                    dist\HOTKEYS.txt
 echo ===============================================
 endlocal

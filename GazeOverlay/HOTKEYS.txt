@@ -1,0 +1,75 @@
+================================================================
+  GazeOverlay  -  Hotkey Reference
+================================================================
+
+GLOBAL HOTKEYS (work even while a game is focused)
+----------------------------------------------------------------
+  F8   Toggle overlay visibility (hide / show the gaze dot)
+  F9   Start / stop session recording  ->  saves to sessions\
+  F10  Quit the app
+  F11  Recalibrate (re-opens the calibration window)
+
+
+CALIBRATION WINDOW (only inside the calibration window)
+----------------------------------------------------------------
+  C       Step 1 - Lock eye spheres
+  S       Step 2 - Calibrate screen center
+  Enter   Step 3 - Start overlay
+
+
+TYPICAL SESSION FLOW
+----------------------------------------------------------------
+  1. Launch GazeOverlay.exe
+  2. Look at the CENTER of your screen
+  3. Press C, then S, then Enter
+  4. Switch to your game (Borderless Windowed mode)
+  5. Press F9 to start recording
+  6. Play
+  7. Press F9 again to save the CSV
+  8. Press F10 to quit
+
+
+WHERE FILES ARE STORED
+----------------------------------------------------------------
+  Next to GazeOverlay.exe:
+    sessions\session_YYYYMMDD_HHMMSS.csv   <- gaze data per session
+    app.log                                <- diagnostic log
+
+  CSV columns:
+    timestamp, screen_x, screen_y, yaw_deg, pitch_deg,
+    ear_left, ear_right, event
+
+  event values:
+    (empty)        normal sample
+    fixation_start fixation began
+    fixation_end   fixation ended
+    saccade        rapid eye movement
+    blink_start    blink began
+    blink_end      blink ended
+
+
+VIEWING A SESSION REPORT
+----------------------------------------------------------------
+  Open the CSV in Excel for raw data, OR run from a Python install:
+    python report.py sessions\session_YYYYMMDD_HHMMSS.csv
+
+  This generates a heatmap, fixation histogram, blink-rate-over-time
+  chart, EAR trace, and a summary panel including the stress score.
+
+
+TIPS
+----------------------------------------------------------------
+  - Fullscreen-EXCLUSIVE games hide overlays. Switch the game to
+    Borderless Windowed (or Windowed) in its video settings.
+  - Webcam tracking accuracy is ~1-2 degrees. Good for awareness,
+    not for FPS aim.
+  - Status badge at top-left tells you what is happening:
+      "Tracking"               = working
+      "Calibrate first"        = run calibration
+      "No face detected"       = move into webcam view, fix lighting
+      "Recording -> ..."       = saving samples to CSV
+      "Saved ... (stress=...)" = recording stopped, file saved
+  - Sessions can run for hours. A 5-minute session is ~600 KB.
+  - If anything goes wrong, check app.log next to the .exe.
+
+================================================================
