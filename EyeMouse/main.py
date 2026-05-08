@@ -42,6 +42,28 @@ from dwell_overlay import DwellOverlay  # noqa: E402
 from settings_window import SettingsWindow, load_config, save_config  # noqa: E402
 
 
+def _app_dir() -> Path:
+    """Folder where the EXE (or main.py) lives — logs/config land next to it."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+LOG_PATH = _app_dir() / "eyemouse.log"
+
+
+def _log(msg: str, exc: bool = False):
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+            if exc:
+                import traceback
+                f.write(traceback.format_exc())
+                f.write("\n")
+    except OSError:
+        pass
+
+
 class EyeMouseController(QObject):
     sample_signal = pyqtSignal(object)
 
@@ -214,8 +236,13 @@ def main():
     print("=" * 60)
     print("Hotkeys: F8 toggle | F9 settings | F10 quit | F11 recalibrate | F12 panic")
     print()
-    ctrl = EyeMouseController()
-    sys.exit(ctrl.run())
+    _log(f"EyeMouse starting (frozen={getattr(sys, 'frozen', False)}, app_dir={_app_dir()})")
+    try:
+        ctrl = EyeMouseController()
+        sys.exit(ctrl.run())
+    except Exception as e:
+        _log(f"Fatal startup error: {e!r}", exc=True)
+        raise
 
 
 if __name__ == "__main__":

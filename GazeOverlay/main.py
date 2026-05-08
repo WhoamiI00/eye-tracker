@@ -38,8 +38,31 @@ from metrics import MetricsLogger, summarize
 from overlay import GazeOverlay
 
 
-SESSIONS_DIR = Path(__file__).resolve().parent / "sessions"
+def _app_dir() -> Path:
+    """Folder where the EXE (or main.py) lives — sessions go next to it.
+    Under PyInstaller --onefile, __file__ points at a temp unpack dir that
+    gets wiped on exit, so we use sys.executable instead when frozen."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+SESSIONS_DIR = _app_dir() / "sessions"
 SESSIONS_DIR.mkdir(exist_ok=True)
+LOG_PATH = _app_dir() / "app.log"
+
+
+def _log(msg: str, exc: bool = False):
+    """Append a line to app.log next to the EXE. Silent on failure."""
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+            if exc:
+                import traceback
+                f.write(traceback.format_exc())
+                f.write("\n")
+    except OSError:
+        pass
 
 
 class CalibrationWindow(QWidget):
@@ -250,7 +273,11 @@ class AppController(QObject):
             self.overlay.set_status("No face detected", "#ff5577")
 
         if self.recording and self.logger is not None:
-            self.logger.add_sample(sample)
+            try:
+                self.logger.add_sample(sample)
+            except Exception as e:
+                _log(f"add_sample failed: {e!r}", exc=True)
+                self.overlay.set_status("Logger error — see log", "#ff5577")
 
     def _poll_hotkeys(self):
         now = time.time()
@@ -281,26 +308,35 @@ class AppController(QObject):
         if not self.engine.is_calibrated:
             self.overlay.set_status("Cannot record — not calibrated", "#ff5577")
             return
-        if not self.recording:
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            self.current_csv = SESSIONS_DIR / f"session_{ts}.csv"
-            self.logger = MetricsLogger(str(self.current_csv))
-            self.recording = True
-            self.overlay.set_recording(True)
-            self.overlay.set_status(f"Recording -> {self.current_csv.name}", "#00ff88")
-        else:
-            stats = self.logger.close()
-            summary = summarize(stats)
+        try:
+            if not self.recording:
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                self.current_csv = SESSIONS_DIR / f"session_{ts}.csv"
+                self.logger = MetricsLogger(str(self.current_csv))
+                self.recording = True
+                self.overlay.set_recording(True)
+                self.overlay.set_status(f"Recording -> {self.current_csv.name}", "#00ff88")
+                _log(f"Recording started: {self.current_csv}")
+            else:
+                stats = self.logger.close()
+                summary = summarize(stats)
+                self.recording = False
+                self.logger = None
+                self.overlay.set_recording(False)
+                self.overlay.set_status(
+                    f"Saved {self.current_csv.name}  "
+                    f"(stress={summary['stress_score']}, blinks={summary['blink_count']})",
+                    "#00ff88",
+                )
+                _log(f"Session saved: {self.current_csv} (samples={summary['samples']})")
+                print(f"\n[Session saved] {self.current_csv}")
+                print(f"  Run: python report.py \"{self.current_csv}\"")
+        except Exception as e:
             self.recording = False
             self.logger = None
             self.overlay.set_recording(False)
-            self.overlay.set_status(
-                f"Saved {self.current_csv.name}  "
-                f"(stress={summary['stress_score']}, blinks={summary['blink_count']})",
-                "#00ff88",
-            )
-            print(f"\n[Session saved] {self.current_csv}")
-            print(f"  Run: python report.py \"{self.current_csv}\"")
+            self.overlay.set_status(f"Recording error — see log", "#ff5577")
+            _log(f"Recording toggle failed: {e!r}", exc=True)
 
     def _show_calibration(self):
         self.engine.reset_calibration()
@@ -329,8 +365,13 @@ class AppController(QObject):
 
 
 def main():
-    ctrl = AppController()
-    sys.exit(ctrl.run())
+    _log(f"GazeOverlay starting (frozen={getattr(sys, 'frozen', False)}, app_dir={_app_dir()})")
+    try:
+        ctrl = AppController()
+        sys.exit(ctrl.run())
+    except Exception as e:
+        _log(f"Fatal startup error: {e!r}", exc=True)
+        raise
 
 
 if __name__ == "__main__":
