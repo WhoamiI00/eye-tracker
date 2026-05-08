@@ -23,7 +23,10 @@ pyinstaller ^
     --add-data "%MP_DIR%\modules;mediapipe\modules" ^
     --hidden-import mediapipe ^
     --hidden-import scipy.spatial.transform._rotation_groups ^
+    --hidden-import pynput.mouse._win32 ^
+    --hidden-import pynput.keyboard._win32 ^
     --collect-all mediapipe ^
+    --collect-submodules pynput ^
     main.py
 
 if errorlevel 1 (

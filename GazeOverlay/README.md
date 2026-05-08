@@ -16,10 +16,11 @@ Global — work even when a game has focus:
 
 | Key | Action |
 |-----|--------|
+| `F2`  | Toggle **click-to-correct** mode (10 sec) — clicks teach the tracker where you were looking |
 | `F8`  | Toggle overlay visibility |
 | `F9`  | Start / stop session recording |
 | `F10` | Quit |
-| `F11` | Recalibrate |
+| `F11` | Recalibrate from scratch |
 
 ## Setup (Python 3.11 required)
 
@@ -33,12 +34,15 @@ python main.py
 
 ## Calibration flow
 
-1. Look at the **center of your screen**.
-2. Click "1. Lock eye spheres" (or press `C`).
-3. Look at the center again, click "2. Calibrate screen center" (or press `S`).
-4. Click "3. Start overlay" — the calibration window hides.
-5. Optionally press `F9` to start recording a session.
+1. Look at the center of your screen and click **"Lock eye spheres"** (or press `C`).
+2. A **fullscreen 9-point sequence** runs (~15 sec). Follow the green dot with your eyes; keep your head still.
+3. The fit is saved to `~/.gaze_overlay_calibration.json` — next launch you can reuse it.
+4. (Optional) Press `F2` and click on a few real UI items to refine the fit while you use the app.
+5. Press `F9` to start recording a session.
 6. Press `F9` again to stop. The CSV is written to `sessions/`.
+
+### Why the 9-point fit
+The previous single-point version hardcoded "screen spans 25° horizontally" and got worse the further you looked from center. The new version fits a degree-2 polynomial `(yaw, pitch) → (x, y)` via least squares — each region of the screen gets its own correction. Click-to-correct (F2) adds high-weight samples on the fly without restarting calibration.
 
 ## Viewing a session report
 

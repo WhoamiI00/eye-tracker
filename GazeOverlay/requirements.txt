@@ -6,3 +6,4 @@ pyautogui>=0.9.54
 keyboard>=0.13.5
 PyQt6>=6.6
 matplotlib>=3.8
+pynput>=1.7  # for click-to-correct (F2 mode)

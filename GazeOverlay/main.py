@@ -36,6 +36,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gaze_engine import GazeEngine, GazeSample
 from metrics import MetricsLogger, summarize
 from overlay import GazeOverlay
+from calibration import CalibrationModel
+from calibration_window import NinePointCalibration
 
 
 def _app_dir() -> Path:
@@ -66,9 +68,12 @@ def _log(msg: str, exc: bool = False):
 
 
 class CalibrationWindow(QWidget):
-    """Small window with webcam preview + calibration instructions."""
+    """Small window with webcam preview. The user confirms framing and clicks
+    'Lock eye spheres'; the controller then launches the fullscreen 9-point
+    sequence."""
 
-    started_recording = pyqtSignal()  # not currently used; reserved
+    eye_lock_requested = pyqtSignal()
+    skipped = pyqtSignal()
 
     def __init__(self, engine: GazeEngine):
         super().__init__()
@@ -105,7 +110,10 @@ class CalibrationWindow(QWidget):
         self.preview.setText("Starting webcam...")
         layout.addWidget(self.preview)
 
-        self.step_label = QLabel("Step 1: Look at the CENTER of your screen, then press the button below.")
+        self.step_label = QLabel(
+            "Make sure your face is centered and well lit, then look at the\n"
+            "CENTER of your screen and press 'Lock eye spheres'."
+        )
         self.step_label.setObjectName("step")
         self.step_label.setWordWrap(True)
         layout.addWidget(self.step_label)
@@ -114,26 +122,19 @@ class CalibrationWindow(QWidget):
         layout.addWidget(sep)
 
         btn_row = QHBoxLayout()
-        self.calib_btn = QPushButton("1. Lock eye spheres  (C)")
+        self.calib_btn = QPushButton("Lock eye spheres  (C)")
         self.calib_btn.setObjectName("primary")
         self.calib_btn.clicked.connect(self._do_eye_calib)
         btn_row.addWidget(self.calib_btn)
 
-        self.screen_btn = QPushButton("2. Calibrate screen center  (S)")
-        self.screen_btn.clicked.connect(self._do_screen_calib)
-        self.screen_btn.setEnabled(False)
-        btn_row.addWidget(self.screen_btn)
-
-        self.done_btn = QPushButton("3. Start overlay  (Enter)")
-        self.done_btn.clicked.connect(self._finish)
-        self.done_btn.setEnabled(False)
-        btn_row.addWidget(self.done_btn)
+        self.skip_btn = QPushButton("Use saved calibration")
+        self.skip_btn.clicked.connect(lambda: self.skipped.emit())
+        btn_row.addWidget(self.skip_btn)
         layout.addLayout(btn_row)
 
         hint = QLabel(
-            "Hotkeys after calibration:  "
-            "F8 = toggle overlay   F9 = start/stop recording   "
-            "F10 = quit   F11 = recalibrate"
+            "After lock, a 9-point fullscreen calibration runs (~15 sec).\n"
+            "Hotkeys later:  F8 toggle overlay  -  F9 record  -  F10 quit  -  F11 recalibrate"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -168,46 +169,32 @@ class CalibrationWindow(QWidget):
         self.preview.setPixmap(pix)
 
     def _poll_keys(self):
-        # In-window only; we do not consume global F-keys here (those run outside)
         if self.isActiveWindow():
             try:
                 if keyboard.is_pressed('c') and self.calib_btn.isEnabled():
                     self._do_eye_calib()
-                elif keyboard.is_pressed('s') and self.screen_btn.isEnabled():
-                    self._do_screen_calib()
-                elif keyboard.is_pressed('enter') and self.done_btn.isEnabled():
-                    self._finish()
             except Exception:
                 pass
 
     def _do_eye_calib(self):
         self.engine.request_eye_calibration()
-        QTimer.singleShot(150, self._after_eye_calib)
+        QTimer.singleShot(200, self._after_eye_calib)
 
     def _after_eye_calib(self):
-        if self.engine.is_calibrated:
+        if self.engine.eye_locked:
             self.calib_btn.setText("[OK] Eye spheres locked")
             self.calib_btn.setEnabled(False)
-            self.screen_btn.setEnabled(True)
-            self.screen_btn.setObjectName("primary")
-            self.screen_btn.setStyle(self.screen_btn.style())
-            self.step_label.setText(
-                "Step 2: Keep looking at the screen CENTER, then press the next button."
-            )
+            self.step_label.setText("Starting 9-point calibration...")
+            self.eye_lock_requested.emit()
 
-    def _do_screen_calib(self):
-        self.engine.request_screen_calibration()
-        QTimer.singleShot(150, self._after_screen_calib)
+    def set_skip_enabled(self, enabled: bool):
+        """Show / hide the 'Use saved calibration' button based on whether
+        a fitted model was loaded from disk."""
+        self.skip_btn.setVisible(enabled)
 
-    def _after_screen_calib(self):
-        self.screen_btn.setText("[OK] Screen mapping zeroed")
-        self.screen_btn.setEnabled(False)
-        self.done_btn.setEnabled(True)
-        self.done_btn.setObjectName("primary")
-        self.done_btn.setStyle(self.done_btn.style())
-        self.step_label.setText("All set — press Start to launch the overlay.")
-
-    def _finish(self):
+    def hide_for_9point(self):
+        """Hide preview + stop the engine's annotation overhead during the
+        fullscreen calibration."""
         self.engine.preview_enabled = False
         self.hide()
 
@@ -226,13 +213,32 @@ class AppController(QObject):
         self.app = QApplication.instance() or QApplication(sys.argv)
 
         screen = QGuiApplication.primaryScreen().geometry()
+        sw, sh = screen.width(), screen.height()
+
+        # Try to restore a saved calibration model
+        saved_model = CalibrationModel.load(sw, sh)
+        self.has_saved_model = saved_model is not None
+        model = saved_model if saved_model is not None else CalibrationModel(
+            screen_w=sw, screen_h=sh,
+        )
+
         self.engine = GazeEngine(
-            screen_w=screen.width(),
-            screen_h=screen.height(),
+            screen_w=sw, screen_h=sh,
             on_sample=self._on_sample_thread,
+            model=model,
         )
         self.overlay = GazeOverlay()
         self.calib_window = CalibrationWindow(self.engine)
+        self.calib_window.set_skip_enabled(self.has_saved_model)
+        self.calib_window.eye_lock_requested.connect(self._start_9point)
+        self.calib_window.skipped.connect(self._use_saved_model)
+
+        self.nine_point: NinePointCalibration = None  # created lazily
+
+        # Click-to-correct state
+        self._click_correct_active = False
+        self._click_correct_until = 0.0
+        self._mouse_listener = None
 
         self.recording = False
         self.logger: MetricsLogger = None
@@ -293,10 +299,17 @@ class AppController(QObject):
             except Exception:
                 pass
 
-        fire('f8', self._toggle_overlay)
-        fire('f9', self._toggle_recording)
+        fire('f2',  self._toggle_click_correct)
+        fire('f8',  self._toggle_overlay)
+        fire('f9',  self._toggle_recording)
         fire('f10', self._quit)
         fire('f11', self._show_calibration)
+
+        # Auto-disable click-correct after timeout even without a click
+        if self._click_correct_active and now > self._click_correct_until:
+            self._click_correct_active = False
+            self._stop_mouse_listener()
+            self.overlay.set_status("Click-to-correct timed out", "#cccccc")
 
     def _toggle_overlay(self):
         if self.overlay.isVisible():
@@ -339,24 +352,115 @@ class AppController(QObject):
             _log(f"Recording toggle failed: {e!r}", exc=True)
 
     def _show_calibration(self):
+        # Wipe the current model — full re-calibration from scratch
         self.engine.reset_calibration()
-        self.calib_window.calib_btn.setText("1. Lock eye spheres  (C)")
+        self.has_saved_model = False
+        self.calib_window.calib_btn.setText("Lock eye spheres  (C)")
         self.calib_window.calib_btn.setEnabled(True)
-        self.calib_window.screen_btn.setText("2. Calibrate screen center  (S)")
-        self.calib_window.screen_btn.setEnabled(False)
-        self.calib_window.done_btn.setEnabled(False)
+        self.calib_window.set_skip_enabled(False)
         self.calib_window.step_label.setText(
-            "Step 1: Look at the CENTER of your screen, then press the button below."
+            "Look at the CENTER of your screen and press 'Lock eye spheres'."
         )
         self.engine.preview_enabled = True
         self.calib_window.show()
         self.calib_window.raise_()
         self.calib_window.activateWindow()
 
+    # ---- 9-point flow ----
+
+    def _start_9point(self):
+        """Called after eye-sphere lock succeeds in the small preview window."""
+        self.calib_window.hide_for_9point()
+        self.overlay.hide()
+        if self.nine_point is None:
+            self.nine_point = NinePointCalibration(self.engine, self.engine.model)
+            self.nine_point.finished.connect(self._on_9point_done)
+        self.nine_point.start()
+
+    def _on_9point_done(self, success: bool):
+        self.overlay.show()
+        if success:
+            self.engine.model.save()
+            _log(f"9-point calibration done; saved {len(self.engine.model.samples)} samples")
+            self.overlay.set_status("Calibrated  (F2 = click-to-correct)", "#00ff88")
+        else:
+            _log("9-point calibration failed or cancelled")
+            self.overlay.set_status("Calibration cancelled — F11 to retry", "#ff5577")
+
+    def _use_saved_model(self):
+        """User clicked 'Use saved calibration'. We still need eye-spheres
+        locked at the current head pose, so request a quick lock and skip
+        straight to tracking."""
+        self.engine.request_eye_calibration()
+        QTimer.singleShot(250, self.calib_window.hide_for_9point)
+        QTimer.singleShot(300, lambda: self.overlay.set_status(
+            "Using saved calibration  (F2 = click-to-correct)", "#00ff88"))
+        _log("Reused saved calibration model")
+
+    # ---- click-to-correct ----
+
+    def _toggle_click_correct(self):
+        """F2: enable click-to-correct mode for ~10 seconds. While active,
+        any real mouse click adds a high-weight calibration sample at the
+        click position. Refits the model on each click."""
+        if self._click_correct_active:
+            self._click_correct_active = False
+            self._stop_mouse_listener()
+            self.overlay.set_status("Click-to-correct OFF", "#cccccc")
+            return
+        if not self.engine.is_calibrated:
+            self.overlay.set_status("Calibrate first (F11)", "#ff5577")
+            return
+        self._click_correct_active = True
+        self._click_correct_until = time.time() + 10.0
+        self.overlay.set_status("Click-to-correct ON (10s) — click where you're looking", "#00ddff")
+        self._start_mouse_listener()
+
+    def _start_mouse_listener(self):
+        # Lazy-import pynput so it's only loaded if user actually uses this feature
+        try:
+            from pynput import mouse  # type: ignore
+        except ImportError:
+            self.overlay.set_status("Click-to-correct needs `pip install pynput`", "#ff5577")
+            self._click_correct_active = False
+            _log("pynput not installed — click-to-correct unavailable")
+            return
+
+        def on_click(x, y, button, pressed):
+            if not pressed or not self._click_correct_active:
+                return
+            if time.time() > self._click_correct_until:
+                # Auto-disable after timeout
+                self._click_correct_active = False
+                self._stop_mouse_listener()
+                return
+            yaw, pitch = self.engine.latest_angles()
+            self.engine.model.add_click_correction(x, y, yaw, pitch)
+            ok = self.engine.model.fit()
+            if ok:
+                self.engine.model.save()
+                _log(f"Click-correct: ({x},{y}) yaw={yaw:.2f} pitch={pitch:.2f} -> refit ok")
+            else:
+                _log(f"Click-correct: refit failed")
+
+        self._mouse_listener = mouse.Listener(on_click=on_click)
+        self._mouse_listener.start()
+
+    def _stop_mouse_listener(self):
+        if self._mouse_listener is not None:
+            try:
+                self._mouse_listener.stop()
+            except Exception:
+                pass
+            self._mouse_listener = None
+
     def _quit(self):
         if self.recording and self.logger:
             stats = self.logger.close()
             print(f"[Auto-saved on quit] {self.current_csv}")
+        self._stop_mouse_listener()
+        if self.engine.model.is_fitted:
+            self.engine.model.save()
         self.engine.stop()
         self.app.quit()
 

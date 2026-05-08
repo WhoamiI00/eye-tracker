@@ -12,12 +12,14 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 import cv2
 import mediapipe as mp
 import numpy as np
 from scipy.spatial.transform import Rotation as Rscipy
+
+from calibration import CalibrationModel
 
 
 # Nose landmark indices (stable for head pose PCA) — same as MonitorTracking.py
@@ -79,11 +81,14 @@ class GazeEngine:
     reads webcam frames, runs MediaPipe, computes gaze, and invokes
     on_sample(GazeSample) for every processed frame.
 
-    Calibration is two-step (matches the original tracker):
-      1. request_eye_calibration() — user looks at center of screen, this
-         locks both eye spheres and creates the monitor plane.
-      2. request_screen_calibration() — user looks at center of screen again,
-         this zeros the yaw/pitch offsets so center == screen center.
+    Calibration is now in two layers:
+      1. request_eye_calibration() — user looks at screen center; this locks
+         both eye spheres so the gaze direction can be derived. From this
+         point on, every frame produces raw (yaw, pitch) in degrees.
+      2. CalibrationModel (in calibration.py) — separately, a 9-point
+         polynomial fit maps (yaw, pitch) -> (screen_x, screen_y). The
+         engine holds a model reference but does not run the fitting itself
+         (the calibration window owns that flow).
     """
 
     def __init__(
@@ -93,21 +98,20 @@ class GazeEngine:
         on_sample: Callable[[GazeSample], None],
         camera_index: int = 0,
         filter_length: int = 10,
-        yaw_fov_deg: float = 25.0,
-        pitch_fov_deg: float = 15.0,
+        model: Optional[CalibrationModel] = None,
     ):
         self.screen_w = screen_w
         self.screen_h = screen_h
         self.on_sample = on_sample
         self.camera_index = camera_index
         self.filter_length = filter_length
-        self.yaw_fov_deg = yaw_fov_deg
-        self.pitch_fov_deg = pitch_fov_deg
+        self.model = model if model is not None else CalibrationModel(
+            screen_w=screen_w, screen_h=screen_h,
+        )
 
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._calib_eye_request = False
-        self._calib_screen_request = False
 
         # State (mirrors MonitorTracking.py globals)
         self._left_locked = False
@@ -116,10 +120,13 @@ class GazeEngine:
         self._right_offset = None
         self._left_calib_scale = None
         self._right_calib_scale = None
-        self._calib_yaw_offset = 0.0
-        self._calib_pitch_offset = 0.0
         self._R_ref_nose = [None]
         self._dir_buffer: deque = deque(maxlen=filter_length)
+
+        # Latest raw angles, exposed for the calibration window to sample
+        self._latest_yaw: float = 0.0
+        self._latest_pitch: float = 0.0
+        self._latest_lock = threading.Lock()
 
         # For external preview windows (None unless preview_enabled=True)
         self.preview_enabled = False
@@ -144,20 +151,27 @@ class GazeEngine:
         """Lock eye spheres on the next frame (user must be looking at screen center)."""
         self._calib_eye_request = True
 
-    def request_screen_calibration(self):
-        """Zero the gaze offsets on the next frame (user must be looking at screen center)."""
-        self._calib_screen_request = True
-
     def reset_calibration(self):
         self._left_locked = False
         self._right_locked = False
-        self._calib_yaw_offset = 0.0
-        self._calib_pitch_offset = 0.0
         self._dir_buffer.clear()
+        self.model.reset()
+
+    @property
+    def eye_locked(self) -> bool:
+        """Eye spheres locked? Required before yaw/pitch is meaningful."""
+        return self._left_locked and self._right_locked
 
     @property
     def is_calibrated(self) -> bool:
-        return self._left_locked and self._right_locked
+        """Fully usable: eyes locked AND screen-mapping model fitted."""
+        return self.eye_locked and self.model.is_fitted
+
+    def latest_angles(self) -> Tuple[float, float]:
+        """Most recent (yaw, pitch) in degrees. Used by the calibration window
+        to grab samples while the user looks at each target point."""
+        with self._latest_lock:
+            return self._latest_yaw, self._latest_pitch
 
     def get_preview_frame(self):
         """Returns the most recent annotated webcam frame (BGR), or None."""
@@ -242,7 +256,7 @@ class GazeEngine:
                     self._right_locked = True
                     self._dir_buffer.clear()
 
-                # --- compute gaze if calibrated ---
+                # --- compute gaze if eyes locked ---
                 screen_x = self.screen_w // 2
                 screen_y = self.screen_h // 2
                 yaw_deg = 0.0
@@ -266,13 +280,14 @@ class GazeEngine:
                         avg = np.mean(self._dir_buffer, axis=0)
                         avg /= np.linalg.norm(avg)
 
-                        screen_x, screen_y, yaw_deg, pitch_deg = self._gaze_to_screen(avg)
+                        yaw_deg, pitch_deg = self._direction_to_angles(avg)
 
-                        if self._calib_screen_request:
-                            self._calib_screen_request = False
-                            self._calib_yaw_offset = -yaw_deg
-                            self._calib_pitch_offset = -pitch_deg
-                            screen_x, screen_y, yaw_deg, pitch_deg = self._gaze_to_screen(avg)
+                        with self._latest_lock:
+                            self._latest_yaw = yaw_deg
+                            self._latest_pitch = pitch_deg
+
+                        if self.model.is_fitted:
+                            screen_x, screen_y = self.model.predict(yaw_deg, pitch_deg)
 
                 # --- blink detection (works without calibration) ---
                 ear_l = _ear(lm, LEFT_EYE_EAR, w, h)
@@ -297,7 +312,11 @@ class GazeEngine:
             cap.release()
             face_mesh.close()
 
-    def _gaze_to_screen(self, direction: np.ndarray):
+    def _direction_to_angles(self, direction: np.ndarray) -> Tuple[float, float]:
+        """Convert a 3D gaze direction vector to (yaw, pitch) in degrees.
+        Sign convention preserved from the original tracker: yaw is negative
+        across the whole horizontal range (the polynomial fit handles the
+        actual mapping)."""
         ref = np.array([0, 0, -1])
         d = direction / np.linalg.norm(direction)
 
@@ -315,20 +334,8 @@ class GazeEngine:
 
         yaw_deg = math.degrees(yaw_rad)
         pitch_deg = math.degrees(pitch_rad)
-        # Same sign-flip as the original (left = negative after the convert)
         yaw_deg = -yaw_deg if yaw_deg > 0 else -yaw_deg
-
-        raw_yaw = yaw_deg
-        raw_pitch = pitch_deg
-
-        adj_yaw = yaw_deg + self._calib_yaw_offset
-        adj_pitch = pitch_deg + self._calib_pitch_offset
-
-        sx = int(((adj_yaw + self.yaw_fov_deg) / (2 * self.yaw_fov_deg)) * self.screen_w)
-        sy = int(((self.pitch_fov_deg - adj_pitch) / (2 * self.pitch_fov_deg)) * self.screen_h)
-        sx = max(0, min(sx, self.screen_w - 1))
-        sy = max(0, min(sy, self.screen_h - 1))
-        return sx, sy, raw_yaw, raw_pitch
+        return yaw_deg, pitch_deg
 
     def _draw_preview(self, frame, lm, w, h, iris_l, iris_r, head_center, R_final, sx, sy):
         # Cheap overlay: iris dots + status text

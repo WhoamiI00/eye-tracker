@@ -4,29 +4,55 @@
 
 GLOBAL HOTKEYS (work even while a game is focused)
 ----------------------------------------------------------------
+  F2   Toggle CLICK-TO-CORRECT mode (10 sec window)
+       While ON, every real mouse click teaches the tracker
+       "the user was looking near here". Use it to fix drift
+       without redoing the full calibration.
   F8   Toggle overlay visibility (hide / show the gaze dot)
   F9   Start / stop session recording  ->  saves to sessions\
   F10  Quit the app
-  F11  Recalibrate (re-opens the calibration window)
+  F11  Recalibrate from scratch (re-opens calibration)
 
 
-CALIBRATION WINDOW (only inside the calibration window)
+CALIBRATION WINDOW
 ----------------------------------------------------------------
-  C       Step 1 - Lock eye spheres
-  S       Step 2 - Calibrate screen center
-  Enter   Step 3 - Start overlay
+  C    Lock eye spheres (look at the screen center first)
+
+  After clicking 'Lock eye spheres', a fullscreen 9-point
+  sequence runs (~15 seconds). Just follow the green dot with
+  your eyes and keep your head still.
+
+  If you've calibrated before, the 'Use saved calibration'
+  button skips the 9-point sequence and reuses the model.
 
 
 TYPICAL SESSION FLOW
 ----------------------------------------------------------------
   1. Launch GazeOverlay.exe
-  2. Look at the CENTER of your screen
-  3. Press C, then S, then Enter
-  4. Switch to your game (Borderless Windowed mode)
-  5. Press F9 to start recording
-  6. Play
-  7. Press F9 again to save the CSV
-  8. Press F10 to quit
+  2. Look at the screen center, click 'Lock eye spheres' (or C)
+  3. Follow the green dot for 9 points
+  4. (Optional) F2 then click on a few UI elements to refine
+  5. Switch to your game (Borderless Windowed)
+  6. F9 to start recording
+  7. Play
+  8. F9 again to save the CSV
+  9. F10 to quit
+
+
+WHY THE NEW CALIBRATION
+----------------------------------------------------------------
+The old version mapped gaze with one calibration point and
+hardcoded "screen spans 25 deg horizontally" constants. That
+caused everything to drift the more you looked away from
+center.
+
+The new version fits a polynomial across 9 points (least squares
+solve), so each part of the screen gets its own correction.
+Click-to-correct (F2) keeps refining the fit while you use it.
+
+Saved calibration is kept at:
+  C:\Users\<you>\.gaze_overlay_calibration.json
+Delete that file (or press F11) to start fresh.
 
 
 WHERE FILES ARE STORED
@@ -34,6 +60,9 @@ WHERE FILES ARE STORED
   Next to GazeOverlay.exe:
     sessions\session_YYYYMMDD_HHMMSS.csv   <- gaze data per session
     app.log                                <- diagnostic log
+
+  In your user folder:
+    .gaze_overlay_calibration.json         <- saved 9-point fit
 
   CSV columns:
     timestamp, screen_x, screen_y, yaw_deg, pitch_deg,
@@ -53,23 +82,22 @@ VIEWING A SESSION REPORT
   Open the CSV in Excel for raw data, OR run from a Python install:
     python report.py sessions\session_YYYYMMDD_HHMMSS.csv
 
-  This generates a heatmap, fixation histogram, blink-rate-over-time
-  chart, EAR trace, and a summary panel including the stress score.
-
 
 TIPS
 ----------------------------------------------------------------
   - Fullscreen-EXCLUSIVE games hide overlays. Switch the game to
     Borderless Windowed (or Windowed) in its video settings.
-  - Webcam tracking accuracy is ~1-2 degrees. Good for awareness,
-    not for FPS aim.
+  - Webcam tracking accuracy is ~1-2 degrees even with the new
+    9-point fit. Good for awareness, not for FPS aim.
+  - Keep your head reasonably still after calibration. If drift
+    becomes obvious, hit F2 and click on a few items, or F11 to
+    redo the full calibration.
   - Status badge at top-left tells you what is happening:
-      "Tracking"               = working
-      "Calibrate first"        = run calibration
-      "No face detected"       = move into webcam view, fix lighting
-      "Recording -> ..."       = saving samples to CSV
-      "Saved ... (stress=...)" = recording stopped, file saved
-  - Sessions can run for hours. A 5-minute session is ~600 KB.
+      "Calibrated  (F2 = click-to-correct)" = working
+      "Click-to-correct ON (10s) ..."       = F2 mode active
+      "Calibrate first  (see window)"       = run calibration
+      "No face detected"                    = move into webcam view
+      "Recording -> ..."                    = saving samples
   - If anything goes wrong, check app.log next to the .exe.
 
 ================================================================
