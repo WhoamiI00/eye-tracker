@@ -181,28 +181,58 @@ class GazeEngine:
     # ---- internal ----
 
     def _run(self):
-        face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
+        print("[engine] _run starting...", flush=True)
+        try:
+            face_mesh = mp.solutions.face_mesh.FaceMesh(
+                static_image_mode=False,
+                max_num_faces=1,
+                refine_landmarks=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
+            )
+            print("[engine] face_mesh ready", flush=True)
 
-        cap = cv2.VideoCapture(self.camera_index)
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open webcam index {self.camera_index}")
+            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+            print(f"[engine] VideoCapture({self.camera_index}) isOpened={cap.isOpened()}",
+                  flush=True)
+            if not cap.isOpened():
+                # Try default backend as fallback
+                cap = cv2.VideoCapture(self.camera_index)
+                print(f"[engine] fallback VideoCapture({self.camera_index}) "
+                      f"isOpened={cap.isOpened()}", flush=True)
+            if not cap.isOpened():
+                raise RuntimeError(f"Could not open webcam index {self.camera_index}")
 
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        base_radius = 20
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            base_radius = 20
+            print(f"[engine] webcam {w}x{h}, entering main loop", flush=True)
+
+            # Frame heartbeat — print fps once per second
+            frame_count = 0
+            blocked_count = 0
+            last_hb = time.time()
+        except Exception as e:
+            import traceback
+            print(f"[engine] STARTUP FAILED: {e!r}\n{traceback.format_exc()}", flush=True)
+            return
 
         try:
             while not self._stop.is_set():
+                now_hb = time.time()
+                if now_hb - last_hb >= 1.0:
+                    print(f"[engine] {frame_count} fps, blocked_reads={blocked_count}",
+                          flush=True)
+                    frame_count = 0
+                    blocked_count = 0
+                    last_hb = now_hb
+
                 ret, frame = cap.read()
                 if not ret:
+                    blocked_count += 1
                     time.sleep(0.01)
                     continue
+                frame_count += 1
 
                 ts = time.time()
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
