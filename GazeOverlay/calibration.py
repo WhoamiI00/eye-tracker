@@ -23,6 +23,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+import time as _time
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -39,6 +40,9 @@ class CalibSample:
     yaw: float               # observed yaw (degrees)
     pitch: float             # observed pitch (degrees)
     weight: float = 1.0      # >1 = trust more (e.g. click-to-correct fresh sample)
+    is_anchor: bool = False  # 9-point calibration samples — never evicted
+    bin_key: Optional[Tuple[int, int]] = None  # spatial grid cell (col, row) for LRU
+    added_at: float = 0.0    # for LRU within a bin
 
 
 def _features(yaw: float, pitch: float) -> np.ndarray:
@@ -56,9 +60,14 @@ class CalibrationModel:
     screen_w: int = 1920
     screen_h: int = 1080
 
-    # Click-to-correct controls
-    max_click_samples: int = 30           # cap recent click samples to avoid drift
-    click_weight: float = 3.0             # fresh clicks weigh more than initial calib
+    # F2 burst click-to-correct
+    click_weight: float = 3.0             # fresh F2 burst clicks weigh more
+
+    # Continuous (always-on) calibration knobs
+    continuous_weight: float = 1.5        # less than F2 burst, more than anchors
+    bins_x: int = 4                       # spatial grid: 4 cols x 3 rows = 12 bins
+    bins_y: int = 3
+    max_per_bin: int = 8                  # LRU cap per bin (anchors don't count)
 
     @property
     def is_fitted(self) -> bool:
@@ -66,23 +75,83 @@ class CalibrationModel:
 
     # ---- adding samples ----
 
-    def add_calibration_sample(self, sx: float, sy: float, yaw: float, pitch: float, weight: float = 1.0):
-        """Used during the 9-point bulk calibration."""
-        self.samples.append(CalibSample(sx, sy, yaw, pitch, weight))
+    def _bin_for(self, sx: float, sy: float) -> Tuple[int, int]:
+        col = max(0, min(self.bins_x - 1, int(sx / max(1, self.screen_w) * self.bins_x)))
+        row = max(0, min(self.bins_y - 1, int(sy / max(1, self.screen_h) * self.bins_y)))
+        return (col, row)
+
+    def add_calibration_sample(self, sx: float, sy: float, yaw: float, pitch: float,
+                               weight: float = 1.0, is_anchor: bool = False):
+        """Used during the 9-point bulk calibration. is_anchor=True means
+        this sample is never evicted by the LRU."""
+        self.samples.append(CalibSample(
+            sx=sx, sy=sy, yaw=yaw, pitch=pitch,
+            weight=weight, is_anchor=is_anchor,
+            bin_key=self._bin_for(sx, sy), added_at=_time.time(),
+        ))
 
     def add_click_correction(self, sx: float, sy: float, yaw: float, pitch: float):
-        """Used at runtime when the user physically clicks somewhere.
-        We assume their gaze was near that click and add it as a high-weight
-        sample. We also bound the number of click samples so the model
-        doesn't drift unboundedly if the user clicks while looking elsewhere."""
-        self.samples.append(CalibSample(sx, sy, yaw, pitch, self.click_weight))
-        # Trim oldest CLICK-weighted samples beyond the cap (preserve bulk-calib ones)
-        click_idxs = [i for i, s in enumerate(self.samples) if s.weight >= self.click_weight - 1e-9]
-        excess = len(click_idxs) - self.max_click_samples
+        """F2 burst-mode click. Higher weight, evicted by LRU like continuous samples."""
+        self._add_evictable(sx, sy, yaw, pitch, self.click_weight)
+
+    def add_continuous_sample(self, sx: float, sy: float, yaw: float, pitch: float):
+        """Continuous-calibration sample (every real click that passes gating).
+        Lower weight than F2 burst, also evicted by LRU."""
+        self._add_evictable(sx, sy, yaw, pitch, self.continuous_weight)
+
+    def _add_evictable(self, sx: float, sy: float, yaw: float, pitch: float, weight: float):
+        bin_key = self._bin_for(sx, sy)
+        sample = CalibSample(
+            sx=sx, sy=sy, yaw=yaw, pitch=pitch,
+            weight=weight, is_anchor=False,
+            bin_key=bin_key, added_at=_time.time(),
+        )
+        self.samples.append(sample)
+        # LRU per bin (only over non-anchor samples in this bin)
+        in_bin = [i for i, s in enumerate(self.samples)
+                  if not s.is_anchor and s.bin_key == bin_key]
+        excess = len(in_bin) - self.max_per_bin
         if excess > 0:
-            for i in click_idxs[:excess]:
+            # Drop oldest non-anchor samples in this bin
+            in_bin_sorted = sorted(in_bin, key=lambda i: self.samples[i].added_at)
+            for i in in_bin_sorted[:excess]:
                 self.samples[i] = None
             self.samples = [s for s in self.samples if s is not None]
+
+    def prune_outliers(self, sigma: float = 2.5) -> int:
+        """After a fit, drop non-anchor samples whose residual is > sigma * MAD
+        from the median. Returns number dropped. Anchors are preserved."""
+        if not self.is_fitted or len(self.samples) < 8:
+            return 0
+        F = np.stack([_features(s.yaw, s.pitch) for s in self.samples], axis=0)
+        pred_x = F @ self.coef_x
+        pred_y = F @ self.coef_y
+        actual_x = np.array([s.sx for s in self.samples])
+        actual_y = np.array([s.sy for s in self.samples])
+        residuals = np.hypot(pred_x - actual_x, pred_y - actual_y)
+        med = float(np.median(residuals))
+        mad = float(np.median(np.abs(residuals - med))) or 1.0
+        threshold = med + sigma * 1.4826 * mad   # 1.4826 -> MAD to stddev for normal dist
+        dropped = 0
+        kept = []
+        for s, r in zip(self.samples, residuals):
+            if s.is_anchor or r <= threshold:
+                kept.append(s)
+            else:
+                dropped += 1
+        self.samples = kept
+        return dropped
+
+    def stats(self) -> dict:
+        anchors = sum(1 for s in self.samples if s.is_anchor)
+        clicks = len(self.samples) - anchors
+        bins_used = len({s.bin_key for s in self.samples if not s.is_anchor})
+        return {
+            "anchors": anchors,
+            "click_samples": clicks,
+            "bins_used": bins_used,
+            "bins_total": self.bins_x * self.bins_y,
+        }
 
     def reset(self):
         self.samples.clear()
@@ -142,7 +211,10 @@ class CalibrationModel:
                 "coef_x": self.coef_x.tolist(),
                 "coef_y": self.coef_y.tolist(),
                 "samples": [
-                    {"sx": s.sx, "sy": s.sy, "yaw": s.yaw, "pitch": s.pitch, "weight": s.weight}
+                    {"sx": s.sx, "sy": s.sy, "yaw": s.yaw, "pitch": s.pitch,
+                     "weight": s.weight, "is_anchor": s.is_anchor,
+                     "bin_key": list(s.bin_key) if s.bin_key else None,
+                     "added_at": s.added_at}
                     for s in self.samples
                 ],
             }
@@ -165,10 +237,17 @@ class CalibrationModel:
             return None
 
         m = cls(screen_w=screen_w, screen_h=screen_h)
-        m.samples = [
-            CalibSample(s["sx"], s["sy"], s["yaw"], s["pitch"], s.get("weight", 1.0))
-            for s in data.get("samples", [])
-        ]
+        samples = []
+        for s in data.get("samples", []):
+            bk = s.get("bin_key")
+            samples.append(CalibSample(
+                sx=s["sx"], sy=s["sy"], yaw=s["yaw"], pitch=s["pitch"],
+                weight=s.get("weight", 1.0),
+                is_anchor=bool(s.get("is_anchor", False)),
+                bin_key=tuple(bk) if bk else None,
+                added_at=float(s.get("added_at", 0.0)),
+            ))
+        m.samples = samples
         try:
             m.coef_x = np.array(data["coef_x"], dtype=float)
             m.coef_y = np.array(data["coef_y"], dtype=float)

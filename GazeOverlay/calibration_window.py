@@ -66,11 +66,15 @@ class NinePointCalibration(QWidget):
     # ---- public ----
 
     def start(self):
-        """Show fullscreen and begin the sequence after a 1-second intro."""
+        """Show fullscreen and begin the sequence after a 1-second intro.
+        Wipes any existing samples — they're from a previous eye-sphere lock
+        and won't match the new one. The fresh 9-point will repopulate the
+        anchor set; continuous calibration takes over from there."""
         self.current_idx = -1
         self.collected_samples.clear()
-        self.model.samples = [s for s in self.model.samples
-                              if s.weight >= self.model.click_weight - 1e-9]  # keep click corrections
+        self.model.samples.clear()
+        self.model.coef_x = None
+        self.model.coef_y = None
         self.showFullScreen()
         self.raise_()
         self.activateWindow()
@@ -82,7 +86,8 @@ class NinePointCalibration(QWidget):
             avg_yaw = sum(y for y, _ in self.collected_samples) / len(self.collected_samples)
             avg_pitch = sum(p for _, p in self.collected_samples) / len(self.collected_samples)
             tx, ty = self.targets[self.current_idx]
-            self.model.add_calibration_sample(tx, ty, avg_yaw, avg_pitch, weight=1.0)
+            self.model.add_calibration_sample(tx, ty, avg_yaw, avg_pitch,
+                                              weight=1.0, is_anchor=True)
         self.collected_samples.clear()
         self.current_idx += 1
 
