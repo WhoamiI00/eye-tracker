@@ -31,17 +31,6 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QFrame,
 )
 
-# CRITICAL: DPI policy must be set BEFORE QApplication is constructed.
-# Without this, on a 125%/150% display Qt reports logical pixels while
-# pynput sends physical pixels — the +1 markers land at wrong positions
-# and continuous-calibration samples are poisoned with wrong screen coords.
-try:
-    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-    )
-except Exception:
-    pass
-
 # Local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gaze_engine import GazeEngine, GazeSample
@@ -225,20 +214,18 @@ class AppController(QObject):
         super().__init__()
         self.app = QApplication.instance() or QApplication(sys.argv)
 
-        # Resolve real (physical) screen pixels, the same units pynput reports.
-        # On a 125%/150% display, screen.geometry() in Qt is logical pixels;
-        # we multiply by devicePixelRatio to get true pixels so that:
-        #   - the calibration model trains on real screen coords
-        #   - +1 markers paint where the user actually clicked
-        #   - 9-point targets reach the real screen corners
+        # Single coord system throughout: Qt LOGICAL pixels (whatever Qt
+        # reports for geometry, e.g. 1536x864 on a 1.25x scaled 1920x1080).
+        # The only place we touch physical pixels is when pynput delivers a
+        # raw mouse click — we divide by devicePixelRatio there and treat
+        # everything else (model, 9-point targets, overlay paint) in logical
+        # space. This keeps the engine + calibration code agnostic of DPI.
         primary = QGuiApplication.primaryScreen()
         geo = primary.geometry()
-        dpr = primary.devicePixelRatio()
-        sw = int(round(geo.width() * dpr))
-        sh = int(round(geo.height() * dpr))
-        self._dpr = dpr
-        _log(f"Screen geometry: {geo.width()}x{geo.height()} logical, dpr={dpr}, "
-             f"using physical {sw}x{sh}")
+        self._dpr = primary.devicePixelRatio()
+        sw = geo.width()
+        sh = geo.height()
+        _log(f"Screen geometry: {sw}x{sh} logical, dpr={self._dpr}")
 
         # Try to restore a saved calibration model
         saved_model = CalibrationModel.load(sw, sh)
@@ -367,8 +354,13 @@ class AppController(QObject):
         def on_click(x, y, button, pressed):
             if not pressed:
                 return
+            # pynput on Windows reports PHYSICAL pixel coords. Everything
+            # else in this app works in Qt LOGICAL pixels. Convert here at
+            # the single boundary where physical coords enter the system.
+            lx = int(x / self._dpr)
+            ly = int(y / self._dpr)
             # Marshal to Qt main thread; pynput runs in its own thread
-            self.click_signal.emit(int(x), int(y))
+            self.click_signal.emit(lx, ly)
 
         self._mouse_listener = mouse.Listener(on_click=on_click)
         self._mouse_listener.start()

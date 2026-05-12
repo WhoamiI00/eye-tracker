@@ -43,20 +43,13 @@ class NinePointCalibration(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
 
-        primary = QGuiApplication.primaryScreen()
-        screen = primary.geometry()
-        self._dpr = primary.devicePixelRatio()
+        screen = QGuiApplication.primaryScreen().geometry()
         self.setGeometry(screen)
-        # Logical (Qt paint coords)
         self.screen_w = screen.width()
         self.screen_h = screen.height()
-        # Physical (matches model + pynput coords)
-        self.phys_w = int(round(self.screen_w * self._dpr))
-        self.phys_h = int(round(self.screen_h * self._dpr))
 
-        # Targets are stored in PHYSICAL pixels (so they go straight into the
-        # CalibrationModel) and converted to logical for paint.
-        self.targets: List[Tuple[int, int]] = nine_point_targets(self.phys_w, self.phys_h)
+        # Targets are in Qt logical pixels — same coord system as the model.
+        self.targets: List[Tuple[int, int]] = nine_point_targets(self.screen_w, self.screen_h)
         self.current_idx = -1               # -1 = intro screen
         self.point_start_ts: float = 0.0
         self.collected_samples: List[Tuple[float, float]] = []  # (yaw, pitch) for current point
@@ -184,10 +177,7 @@ class NinePointCalibration(QWidget):
     def _draw_target(self, p: QPainter):
         if self.current_idx < 0 or self.current_idx >= len(self.targets):
             return
-        phys_tx, phys_ty = self.targets[self.current_idx]
-        # Convert physical -> logical for Qt paint
-        tx = phys_tx / self._dpr
-        ty = phys_ty / self._dpr
+        tx, ty = self.targets[self.current_idx]
         elapsed_ms = (time.time() - self.point_start_ts) * 1000.0
         in_settle = elapsed_ms < SETTLE_MS
         sample_progress = max(0.0, min(1.0, (elapsed_ms - SETTLE_MS) / SAMPLE_MS))
