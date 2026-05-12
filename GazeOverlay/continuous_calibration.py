@@ -33,8 +33,14 @@ class ClickVerdict:
 
 
 FIXATION_WINDOW_S = 0.25
-FIXATION_DISPERSION_PX = 80
-MAX_GAZE_CLICK_DIST_PX = 350
+# Pre-One-Euro screen samples can wobble ~100-130 px on a noisy webcam
+# even when the user's gaze is genuinely fixed. Was 80 (too strict —
+# rejected most clicks). Raised to 140.
+FIXATION_DISPERSION_PX = 140
+# Webcam baseline error is ~50-100 px and people naturally look slightly
+# ahead/below of where they click. Was 350 (still rejected lots). 500 is
+# permissive but the outlier-prune step removes truly bad samples.
+MAX_GAZE_CLICK_DIST_PX = 500
 REFIT_MIN_INTERVAL_S = 0.8
 PRUNE_EVERY_N_REFITS = 5
 

@@ -326,6 +326,18 @@ class AppController(QObject):
     def _on_continuous_reject(self, v: ClickVerdict):
         if v.reason not in ("disabled", "off-screen", "not calibrated yet"):
             self.overlay.show_learn_event(v.mx, v.my, "reject")
+        # Tally reasons so we can see WHY clicks are rejected. Logs a
+        # summary every 10 rejections so the file doesn't get spammy.
+        if not hasattr(self, "_reject_reasons"):
+            self._reject_reasons = {}
+        self._reject_reasons[v.reason] = self._reject_reasons.get(v.reason, 0) + 1
+        total = sum(self._reject_reasons.values())
+        if total > 0 and total % 10 == 0:
+            summary = ", ".join(f"{k}:{n}" for k, n in
+                                sorted(self._reject_reasons.items(),
+                                       key=lambda x: -x[1]))
+            accepted = self.continuous.accepted_count
+            _log(f"continuous rejects so far ({total} reject / {accepted} accept): {summary}")
 
     def _on_click_main(self, mx: int, my: int):
         """Main-thread click handler. Coords are already logical pixels."""
