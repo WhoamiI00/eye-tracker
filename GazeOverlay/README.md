@@ -16,8 +16,7 @@ Global — work even when a game has focus:
 
 | Key | Action |
 |-----|--------|
-| `F2`  | **F2 burst** — 10 seconds of high-weight click-to-correct (fast refinement after calibration) |
-| `F3`  | Toggle **continuous calibration** on/off (default ON — every real click teaches the tracker) |
+| `F2`  | Toggle **click-to-correct** mode (10 sec) — clicks teach the tracker where you were looking |
 | `F8`  | Toggle overlay visibility |
 | `F9`  | Start / stop session recording |
 | `F10` | Quit |
@@ -43,12 +42,7 @@ python main.py
 6. Press `F9` again to stop. The CSV is written to `sessions/`.
 
 ### Why the 9-point fit
-The previous single-point version hardcoded "screen spans 25° horizontally" and got worse the further you looked from center. The new version fits a degree-2 polynomial `(yaw, pitch) → (x, y)` via least squares — each region of the screen gets its own correction.
-
-### Continuous self-calibration (default ON)
-While the overlay runs, every real mouse click is a potential calibration sample. The system uses it only if your gaze was stable, near the click, and on the primary monitor. Accepted clicks float a green **+1** at the click point; rejected ones show a faint `x`.
-
-Samples are binned by screen region (4×3 grid, max 8 per bin LRU) so no single area can poison the fit. Outliers are pruned periodically. The 9 anchor points from the initial calibration are protected from eviction. Press **F3** to pause continuous learning at any time; use **F2** for a 10-second high-weight burst when you want fast tuning.
+The previous single-point version hardcoded "screen spans 25° horizontally" and got worse the further you looked from center. The new version fits a degree-2 polynomial `(yaw, pitch) → (x, y)` via least squares — each region of the screen gets its own correction. Click-to-correct (F2) adds high-weight samples on the fly without restarting calibration.
 
 ## Viewing a session report
 

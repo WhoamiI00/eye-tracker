@@ -12,7 +12,6 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 import cv2
@@ -21,7 +20,6 @@ import numpy as np
 from scipy.spatial.transform import Rotation as Rscipy
 
 from calibration import CalibrationModel
-from one_euro import OneEuro2D
 
 
 # Nose landmark indices (stable for head pose PCA) — same as MonitorTracking.py
@@ -99,7 +97,7 @@ class GazeEngine:
         screen_h: int,
         on_sample: Callable[[GazeSample], None],
         camera_index: int = 0,
-        filter_length: int = 18,    # was 10 — more averaging of the raw direction vector
+        filter_length: int = 10,
         model: Optional[CalibrationModel] = None,
     ):
         self.screen_w = screen_w
@@ -110,16 +108,6 @@ class GazeEngine:
         self.model = model if model is not None else CalibrationModel(
             screen_w=screen_w, screen_h=screen_h,
         )
-
-        # Adaptive smoothing on the final screen-space (sx, sy). Tuned for
-        # ~30 fps gaze: heavy smoothing when still, light during saccades.
-        self._euro = OneEuro2D(min_cutoff=0.8, beta=0.012, d_cutoff=1.0)
-
-        # Fixation-snap state: if gaze stays inside a small radius for a
-        # short time, lock the rendered position to the fixation centroid
-        # so micro-jitter at rest is completely killed.
-        self._fix_buffer: deque = deque(maxlen=10)   # (ts, sx, sy)
-        self._fix_locked_xy: Optional[tuple] = None
 
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -167,9 +155,6 @@ class GazeEngine:
         self._left_locked = False
         self._right_locked = False
         self._dir_buffer.clear()
-        self._fix_buffer.clear()
-        self._fix_locked_xy = None
-        self._euro.reset()
         self.model.reset()
 
     @property
@@ -196,24 +181,6 @@ class GazeEngine:
     # ---- internal ----
 
     def _run(self):
-        try:
-            self._run_loop()
-        except Exception as e:
-            import traceback
-            err = f"GAZE ENGINE CRASHED: {e!r}\n" + traceback.format_exc()
-            print(err, flush=True)
-            # Dump to a few likely-writable locations so the user can find it
-            for candidate in ("engine_crash.log",
-                              "GazeOverlay/engine_crash.log",
-                              str(Path.home() / "engine_crash.log")):
-                try:
-                    with open(candidate, "w", encoding="utf-8") as f:
-                        f.write(err)
-                    break
-                except Exception:
-                    continue
-
-    def _run_loop(self):
         face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
@@ -229,23 +196,9 @@ class GazeEngine:
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         base_radius = 20
-        print(f"[engine] webcam opened: {w}x{h}", flush=True)
-
-        # Heartbeat counter — prints frames-per-second every second so we can
-        # tell if the engine thread is alive but the preview is stuck.
-        frame_count = 0
-        last_hb = time.time()
 
         try:
             while not self._stop.is_set():
-                # Heartbeat
-                now_hb = time.time()
-                if now_hb - last_hb >= 1.0:
-                    print(f"[engine] {frame_count} fps, preview_enabled={self.preview_enabled}",
-                          flush=True)
-                    frame_count = 0
-                    last_hb = now_hb
-                frame_count += 1
                 ret, frame = cap.read()
                 if not ret:
                     time.sleep(0.01)
@@ -301,9 +254,6 @@ class GazeEngine:
                     self._right_calib_scale = cur_scale
                     self._left_locked = True
                     self._right_locked = True
-                    self._euro.reset()
-                    self._fix_buffer.clear()
-                    self._fix_locked_xy = None
                     self._dir_buffer.clear()
 
                 # --- compute gaze if eyes locked ---
@@ -337,35 +287,27 @@ class GazeEngine:
                             self._latest_pitch = pitch_deg
 
                         if self.model.is_fitted:
-                            raw_sx, raw_sy = self.model.predict(yaw_deg, pitch_deg)
-                            screen_x, screen_y = self._smooth_and_snap(raw_sx, raw_sy, ts)
+                            screen_x, screen_y = self.model.predict(yaw_deg, pitch_deg)
 
                 # --- blink detection (works without calibration) ---
                 ear_l = _ear(lm, LEFT_EYE_EAR, w, h)
                 ear_r = _ear(lm, RIGHT_EYE_EAR, w, h)
 
-                try:
-                    self.on_sample(GazeSample(
-                        timestamp=ts,
-                        screen_x=int(screen_x),
-                        screen_y=int(screen_y),
-                        yaw_deg=float(yaw_deg),
-                        pitch_deg=float(pitch_deg),
-                        ear_left=float(ear_l),
-                        ear_right=float(ear_r),
-                        calibrated=self.is_calibrated,
-                        face_visible=True,
-                    ))
-                except Exception as e:
-                    # Never let a consumer exception kill the engine thread.
-                    print(f"[engine] on_sample callback raised: {e!r}", flush=True)
+                self.on_sample(GazeSample(
+                    timestamp=ts,
+                    screen_x=int(screen_x),
+                    screen_y=int(screen_y),
+                    yaw_deg=float(yaw_deg),
+                    pitch_deg=float(pitch_deg),
+                    ear_left=float(ear_l),
+                    ear_right=float(ear_r),
+                    calibrated=self.is_calibrated,
+                    face_visible=True,
+                ))
 
                 if self.preview_enabled:
-                    try:
-                        self._draw_preview(frame, lm, w, h, iris_l, iris_r, head_center,
-                                           R_final, screen_x, screen_y)
-                    except Exception as e:
-                        print(f"[engine] preview draw raised: {e!r}", flush=True)
+                    self._draw_preview(frame, lm, w, h, iris_l, iris_r, head_center,
+                                       R_final, screen_x, screen_y)
         finally:
             cap.release()
             face_mesh.close()
@@ -394,57 +336,6 @@ class GazeEngine:
         pitch_deg = math.degrees(pitch_rad)
         yaw_deg = -yaw_deg if yaw_deg > 0 else -yaw_deg
         return yaw_deg, pitch_deg
-
-    def _smooth_and_snap(self, raw_sx: float, raw_sy: float, ts: float) -> Tuple[int, int]:
-        """Two-stage smoothing of the predicted screen position:
-
-        1. One-Euro filter — adaptive low-pass; aggressive smoothing when
-           gaze is slow, light during saccades.
-        2. Fixation snap — if the smoothed signal stays inside a small
-           radius for ~200 ms, lock to the centroid until motion resumes.
-           This kills residual micro-jitter during fixations entirely.
-        """
-        # Stage 1: One-Euro
-        sx_f, sy_f = self._euro.filter(raw_sx, raw_sy, ts)
-
-        # Stage 2: fixation snap. Maintain a short trailing window.
-        self._fix_buffer.append((ts, sx_f, sy_f))
-        cutoff = ts - 0.30  # 300 ms window
-        while self._fix_buffer and self._fix_buffer[0][0] < cutoff:
-            self._fix_buffer.popleft()
-
-        # Compute window dispersion
-        if len(self._fix_buffer) >= 6:
-            xs = [p[1] for p in self._fix_buffer]
-            ys = [p[2] for p in self._fix_buffer]
-            cx = sum(xs) / len(xs)
-            cy = sum(ys) / len(ys)
-            max_d = max(math.hypot(px - cx, py - cy) for _, px, py in self._fix_buffer)
-
-            FIX_LOCK_RADIUS = 45.0    # px — within this, treat as a fixation
-            FIX_BREAK_RADIUS = 70.0   # px — leave the lock if we drift outside
-
-            if self._fix_locked_xy is None:
-                if max_d <= FIX_LOCK_RADIUS:
-                    self._fix_locked_xy = (cx, cy)
-            else:
-                lx, ly = self._fix_locked_xy
-                dist_from_lock = math.hypot(sx_f - lx, sy_f - ly)
-                if dist_from_lock > FIX_BREAK_RADIUS:
-                    self._fix_locked_xy = None  # saccade — release
-                else:
-                    # Slowly drift the lock toward the new centroid (handles
-                    # genuine slow shifts without re-acquiring instantly)
-                    a = 0.05
-                    self._fix_locked_xy = (lx * (1 - a) + cx * a,
-                                           ly * (1 - a) + cy * a)
-
-        if self._fix_locked_xy is not None:
-            sx_f, sy_f = self._fix_locked_xy
-
-        sx_i = max(0, min(self.screen_w - 1, int(round(sx_f))))
-        sy_i = max(0, min(self.screen_h - 1, int(round(sy_f))))
-        return sx_i, sy_i
 
     def _draw_preview(self, frame, lm, w, h, iris_l, iris_r, head_center, R_final, sx, sy):
         # Cheap overlay: iris dots + status text
