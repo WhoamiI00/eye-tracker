@@ -20,6 +20,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as Rscipy
 
 from calibration import CalibrationModel
+from one_euro import OneEuro2D
 
 
 # Nose landmark indices (stable for head pose PCA) — same as MonitorTracking.py
@@ -109,6 +110,10 @@ class GazeEngine:
             screen_w=screen_w, screen_h=screen_h,
         )
 
+        # Adaptive smoothing on the final screen-space (sx, sy). Heavy when
+        # gaze is slow (kills idle jitter), light during saccades (no lag).
+        self._euro = OneEuro2D(min_cutoff=0.8, beta=0.012, d_cutoff=1.0)
+
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._calib_eye_request = False
@@ -155,6 +160,7 @@ class GazeEngine:
         self._left_locked = False
         self._right_locked = False
         self._dir_buffer.clear()
+        self._euro.reset()
         self.model.reset()
 
     @property
@@ -285,6 +291,7 @@ class GazeEngine:
                     self._left_locked = True
                     self._right_locked = True
                     self._dir_buffer.clear()
+                    self._euro.reset()
 
                 # --- compute gaze if eyes locked ---
                 screen_x = self.screen_w // 2
@@ -317,7 +324,13 @@ class GazeEngine:
                             self._latest_pitch = pitch_deg
 
                         if self.model.is_fitted:
-                            screen_x, screen_y = self.model.predict(yaw_deg, pitch_deg)
+                            raw_sx, raw_sy = self.model.predict(yaw_deg, pitch_deg)
+                            # One-Euro adaptive smoothing on the predicted
+                            # screen position: kills idle jitter without
+                            # adding lag during eye saccades.
+                            f_sx, f_sy = self._euro.filter(raw_sx, raw_sy, ts)
+                            screen_x = max(0, min(self.screen_w - 1, int(round(f_sx))))
+                            screen_y = max(0, min(self.screen_h - 1, int(round(f_sy))))
 
                 # --- blink detection (works without calibration) ---
                 ear_l = _ear(lm, LEFT_EYE_EAR, w, h)
