@@ -212,8 +212,12 @@ class AppController(QObject):
         super().__init__()
         self.app = QApplication.instance() or QApplication(sys.argv)
 
-        screen = QGuiApplication.primaryScreen().geometry()
+        primary = QGuiApplication.primaryScreen()
+        screen = primary.geometry()
         sw, sh = screen.width(), screen.height()
+        # Cached for converting pynput physical-pixel click coords to the
+        # logical-pixel coord system the rest of the app uses.
+        self._dpr = primary.devicePixelRatio()
 
         # Try to restore a saved calibration model
         saved_model = CalibrationModel.load(sw, sh)
@@ -434,12 +438,18 @@ class AppController(QObject):
                 self._click_correct_active = False
                 self._stop_mouse_listener()
                 return
+            # pynput on Windows reports PHYSICAL pixel coords. The rest of
+            # the app (model, overlay) lives in Qt LOGICAL pixels. Convert
+            # at this one boundary so the F2 click sample lands at the
+            # right screen position (matters on 125%/150% displays).
+            lx = int(x / self._dpr)
+            ly = int(y / self._dpr)
             yaw, pitch = self.engine.latest_angles()
-            self.engine.model.add_click_correction(x, y, yaw, pitch)
+            self.engine.model.add_click_correction(lx, ly, yaw, pitch)
             ok = self.engine.model.fit()
             if ok:
                 self.engine.model.save()
-                _log(f"Click-correct: ({x},{y}) yaw={yaw:.2f} pitch={pitch:.2f} -> refit ok")
+                _log(f"Click-correct: ({lx},{ly}) yaw={yaw:.2f} pitch={pitch:.2f} -> refit ok")
             else:
                 _log(f"Click-correct: refit failed")
 
