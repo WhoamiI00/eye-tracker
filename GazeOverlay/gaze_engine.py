@@ -114,6 +114,13 @@ class GazeEngine:
         # gaze is slow (kills idle jitter), light during saccades (no lag).
         self._euro = OneEuro2D(min_cutoff=0.8, beta=0.012, d_cutoff=1.0)
 
+        # Fixation-snap state. If the smoothed gaze stays inside a small
+        # radius for ~300 ms, lock to the centroid until the gaze drifts
+        # beyond a larger "break" radius. Kills any residual jitter during
+        # fixations completely.
+        self._fix_buffer: deque = deque(maxlen=20)  # (ts, sx, sy)
+        self._fix_locked_xy: Optional[tuple] = None
+
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._calib_eye_request = False
@@ -161,6 +168,8 @@ class GazeEngine:
         self._right_locked = False
         self._dir_buffer.clear()
         self._euro.reset()
+        self._fix_buffer.clear()
+        self._fix_locked_xy = None
         self.model.reset()
 
     @property
@@ -292,6 +301,8 @@ class GazeEngine:
                     self._right_locked = True
                     self._dir_buffer.clear()
                     self._euro.reset()
+                    self._fix_buffer.clear()
+                    self._fix_locked_xy = None
 
                 # --- compute gaze if eyes locked ---
                 screen_x = self.screen_w // 2
@@ -329,6 +340,10 @@ class GazeEngine:
                             # screen position: kills idle jitter without
                             # adding lag during eye saccades.
                             f_sx, f_sy = self._euro.filter(raw_sx, raw_sy, ts)
+                            # Fixation snap (second stage). Holds the cursor
+                            # at the fixation centroid when the user isn't
+                            # really moving their eyes.
+                            f_sx, f_sy = self._apply_fixation_snap(f_sx, f_sy, ts)
                             screen_x = max(0, min(self.screen_w - 1, int(round(f_sx))))
                             screen_y = max(0, min(self.screen_h - 1, int(round(f_sy))))
 
@@ -379,6 +394,44 @@ class GazeEngine:
         pitch_deg = math.degrees(pitch_rad)
         yaw_deg = -yaw_deg if yaw_deg > 0 else -yaw_deg
         return yaw_deg, pitch_deg
+
+    def _apply_fixation_snap(self, sx: float, sy: float, ts: float) -> Tuple[float, float]:
+        """If recent gaze stays within FIX_LOCK_RADIUS for ~300 ms, hold the
+        cursor at the fixation centroid until it drifts beyond FIX_BREAK_RADIUS.
+        Centroid drifts slowly so genuine slow head/eye shifts don't lose lock.
+        """
+        FIX_WINDOW_S = 0.30
+        FIX_LOCK_RADIUS = 45.0
+        FIX_BREAK_RADIUS = 70.0
+
+        self._fix_buffer.append((ts, sx, sy))
+        cutoff = ts - FIX_WINDOW_S
+        while self._fix_buffer and self._fix_buffer[0][0] < cutoff:
+            self._fix_buffer.popleft()
+
+        if len(self._fix_buffer) >= 6:
+            xs = [p[1] for p in self._fix_buffer]
+            ys = [p[2] for p in self._fix_buffer]
+            cx = sum(xs) / len(xs)
+            cy = sum(ys) / len(ys)
+            max_d = max(math.hypot(px - cx, py - cy) for _, px, py in self._fix_buffer)
+
+            if self._fix_locked_xy is None:
+                if max_d <= FIX_LOCK_RADIUS:
+                    self._fix_locked_xy = (cx, cy)
+            else:
+                lx, ly = self._fix_locked_xy
+                if math.hypot(sx - lx, sy - ly) > FIX_BREAK_RADIUS:
+                    self._fix_locked_xy = None  # saccade — release
+                else:
+                    # Slowly drift the lock toward the new centroid
+                    a = 0.05
+                    self._fix_locked_xy = (lx * (1 - a) + cx * a,
+                                           ly * (1 - a) + cy * a)
+
+        if self._fix_locked_xy is not None:
+            return self._fix_locked_xy
+        return sx, sy
 
     def _draw_preview(self, frame, lm, w, h, iris_l, iris_r, head_center, R_final, sx, sy):
         # Cheap overlay: iris dots + status text
