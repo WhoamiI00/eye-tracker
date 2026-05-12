@@ -289,8 +289,15 @@ class AppController(QObject):
         self.click_signal.connect(self._on_click_main, type=Qt.ConnectionType.QueuedConnection)
 
         # Engine starts immediately; user calibrates via the window.
+        # NOTE: the global pynput mouse listener is deliberately NOT started
+        # here. On Windows, having pynput's low-level mouse hook + the
+        # `keyboard` library's low-level keyboard hook + OpenCV's DirectShow
+        # webcam capture all active during the calibration phase has been
+        # observed to starve the engine thread (fps drops from 30 -> 1 -> 0).
+        # The click listener is only needed for continuous calibration, which
+        # itself only does anything after the 9-point model is fitted. So we
+        # defer the listener until calibration completes.
         self.engine.start()
-        self._start_global_click_listener()
         self.overlay.set_status("Calibrate first  (see window)", "#ffaa00")
         self.overlay.show()
         self.calib_window.show()
@@ -364,6 +371,9 @@ class AppController(QObject):
     # ---- global mouse listener (always-on) ----
 
     def _start_global_click_listener(self):
+        # Idempotent — safe to call multiple times.
+        if self._mouse_listener is not None:
+            return
         try:
             from pynput import mouse  # type: ignore
         except ImportError:
@@ -508,6 +518,7 @@ class AppController(QObject):
             self.engine.model.save()
             _log(f"9-point calibration done; saved {len(self.engine.model.samples)} samples")
             self.overlay.set_status("Calibrated  (F2 = click-to-correct)", "#00ff88")
+            self._start_global_click_listener()
         else:
             _log("9-point calibration failed or cancelled")
             self.overlay.set_status("Calibration cancelled — F11 to retry", "#ff5577")
@@ -520,6 +531,7 @@ class AppController(QObject):
         QTimer.singleShot(250, self.calib_window.hide_for_9point)
         QTimer.singleShot(300, lambda: self.overlay.set_status(
             "Using saved calibration  (F2 = click-to-correct)", "#00ff88"))
+        QTimer.singleShot(350, self._start_global_click_listener)
         _log("Reused saved calibration model")
 
     # ---- click-to-correct ----
