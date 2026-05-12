@@ -12,6 +12,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 import cv2
@@ -195,6 +196,24 @@ class GazeEngine:
     # ---- internal ----
 
     def _run(self):
+        try:
+            self._run_loop()
+        except Exception as e:
+            import traceback
+            err = f"GAZE ENGINE CRASHED: {e!r}\n" + traceback.format_exc()
+            print(err, flush=True)
+            # Dump to a few likely-writable locations so the user can find it
+            for candidate in ("engine_crash.log",
+                              "GazeOverlay/engine_crash.log",
+                              str(Path.home() / "engine_crash.log")):
+                try:
+                    with open(candidate, "w", encoding="utf-8") as f:
+                        f.write(err)
+                    break
+                except Exception:
+                    continue
+
+    def _run_loop(self):
         face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
@@ -311,21 +330,28 @@ class GazeEngine:
                 ear_l = _ear(lm, LEFT_EYE_EAR, w, h)
                 ear_r = _ear(lm, RIGHT_EYE_EAR, w, h)
 
-                self.on_sample(GazeSample(
-                    timestamp=ts,
-                    screen_x=int(screen_x),
-                    screen_y=int(screen_y),
-                    yaw_deg=float(yaw_deg),
-                    pitch_deg=float(pitch_deg),
-                    ear_left=float(ear_l),
-                    ear_right=float(ear_r),
-                    calibrated=self.is_calibrated,
-                    face_visible=True,
-                ))
+                try:
+                    self.on_sample(GazeSample(
+                        timestamp=ts,
+                        screen_x=int(screen_x),
+                        screen_y=int(screen_y),
+                        yaw_deg=float(yaw_deg),
+                        pitch_deg=float(pitch_deg),
+                        ear_left=float(ear_l),
+                        ear_right=float(ear_r),
+                        calibrated=self.is_calibrated,
+                        face_visible=True,
+                    ))
+                except Exception as e:
+                    # Never let a consumer exception kill the engine thread.
+                    print(f"[engine] on_sample callback raised: {e!r}", flush=True)
 
                 if self.preview_enabled:
-                    self._draw_preview(frame, lm, w, h, iris_l, iris_r, head_center,
-                                       R_final, screen_x, screen_y)
+                    try:
+                        self._draw_preview(frame, lm, w, h, iris_l, iris_r, head_center,
+                                           R_final, screen_x, screen_y)
+                    except Exception as e:
+                        print(f"[engine] preview draw raised: {e!r}", flush=True)
         finally:
             cap.release()
             face_mesh.close()
