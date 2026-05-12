@@ -32,9 +32,15 @@ class GazeOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
-        screen = QGuiApplication.primaryScreen().geometry()
+        primary = QGuiApplication.primaryScreen()
+        screen = primary.geometry()
+        self._dpr = primary.devicePixelRatio()
         self.setGeometry(screen)
 
+        # The overlay window's drawing space is in Qt LOGICAL pixels.
+        # All public coord inputs (update_gaze, show_learn_event) come in as
+        # PHYSICAL pixels (matching pynput + the gaze model), so we divide by
+        # DPR before storing for paint.
         self._gaze_xy = QPointF(screen.width() / 2, screen.height() / 2)
         self._smoothed_xy = QPointF(self._gaze_xy)
         self._has_gaze = False
@@ -59,8 +65,10 @@ class GazeOverlay(QWidget):
     # ---- thread-safe public API ----
 
     def update_gaze(self, x: int, y: int):
-        """Safe to call from any thread."""
-        self._gaze_received.emit(x, y)
+        """Safe to call from any thread. x/y in physical pixels (screen
+        coords as reported by Win32 / pynput / the calibration model)."""
+        # Convert physical -> logical for Qt's paint coord system
+        self._gaze_received.emit(int(x / self._dpr), int(y / self._dpr))
 
     def set_status(self, text: str, color: str = "#00ff88"):
         self._status_received.emit(text, color)
@@ -71,8 +79,8 @@ class GazeOverlay(QWidget):
 
     def show_learn_event(self, x: int, y: int, kind: str = "accept"):
         """Trigger a floating '+1' (kind='accept') or rejection 'X' animation
-        at the given screen position. Thread-safe."""
-        self._learn_received.emit(x, y, kind)
+        at the given physical-pixel screen position. Thread-safe."""
+        self._learn_received.emit(int(x / self._dpr), int(y / self._dpr), kind)
 
     # ---- Qt slots ----
 

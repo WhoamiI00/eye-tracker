@@ -31,6 +31,17 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QFrame,
 )
 
+# CRITICAL: DPI policy must be set BEFORE QApplication is constructed.
+# Without this, on a 125%/150% display Qt reports logical pixels while
+# pynput sends physical pixels — the +1 markers land at wrong positions
+# and continuous-calibration samples are poisoned with wrong screen coords.
+try:
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+except Exception:
+    pass
+
 # Local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gaze_engine import GazeEngine, GazeSample
@@ -214,8 +225,20 @@ class AppController(QObject):
         super().__init__()
         self.app = QApplication.instance() or QApplication(sys.argv)
 
-        screen = QGuiApplication.primaryScreen().geometry()
-        sw, sh = screen.width(), screen.height()
+        # Resolve real (physical) screen pixels, the same units pynput reports.
+        # On a 125%/150% display, screen.geometry() in Qt is logical pixels;
+        # we multiply by devicePixelRatio to get true pixels so that:
+        #   - the calibration model trains on real screen coords
+        #   - +1 markers paint where the user actually clicked
+        #   - 9-point targets reach the real screen corners
+        primary = QGuiApplication.primaryScreen()
+        geo = primary.geometry()
+        dpr = primary.devicePixelRatio()
+        sw = int(round(geo.width() * dpr))
+        sh = int(round(geo.height() * dpr))
+        self._dpr = dpr
+        _log(f"Screen geometry: {geo.width()}x{geo.height()} logical, dpr={dpr}, "
+             f"using physical {sw}x{sh}")
 
         # Try to restore a saved calibration model
         saved_model = CalibrationModel.load(sw, sh)
