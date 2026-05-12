@@ -229,9 +229,23 @@ class GazeEngine:
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         base_radius = 20
+        print(f"[engine] webcam opened: {w}x{h}", flush=True)
+
+        # Heartbeat counter — prints frames-per-second every second so we can
+        # tell if the engine thread is alive but the preview is stuck.
+        frame_count = 0
+        last_hb = time.time()
 
         try:
             while not self._stop.is_set():
+                # Heartbeat
+                now_hb = time.time()
+                if now_hb - last_hb >= 1.0:
+                    print(f"[engine] {frame_count} fps, preview_enabled={self.preview_enabled}",
+                          flush=True)
+                    frame_count = 0
+                    last_hb = now_hb
+                frame_count += 1
                 ret, frame = cap.read()
                 if not ret:
                     time.sleep(0.01)

@@ -154,20 +154,41 @@ class CalibrationWindow(QWidget):
         self._kb_timer.start(50)
 
     def _tick_preview(self):
-        frame = self.engine.get_preview_frame()
-        if frame is None:
-            return
-        # Mirror so it feels like a mirror
-        frame = cv2.flip(frame, 1)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, _ = rgb.shape
-        img = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888)
-        pix = QPixmap.fromImage(img).scaled(
-            self.preview.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.preview.setPixmap(pix)
+        # Heartbeat: print once per second so we can see the QTimer is alive
+        now = time.time()
+        if not hasattr(self, "_last_tick_hb"):
+            self._last_tick_hb = 0.0
+            self._tick_count = 0
+        self._tick_count += 1
+        if now - self._last_tick_hb >= 1.0:
+            print(f"[preview-tick] {self._tick_count} tick/sec, "
+                  f"engine.preview_enabled={self.engine.preview_enabled}",
+                  flush=True)
+            self._tick_count = 0
+            self._last_tick_hb = now
+
+        try:
+            frame = self.engine.get_preview_frame()
+            if frame is None:
+                return
+            # Mirror horizontally so it feels like a mirror
+            frame = cv2.flip(frame, 1)
+            # IMPORTANT: must be contiguous in memory for QImage; the engine
+            # produces fresh arrays so this is usually true, but cv2.flip
+            # and cv2.cvtColor return contiguous arrays anyway.
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, _ = rgb.shape
+            # Wrap and IMMEDIATELY copy — QImage(ndarray.data, ...) is a view
+            # that goes invalid when `rgb` goes out of scope. .copy() detaches.
+            img = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
+            pix = QPixmap.fromImage(img).scaled(
+                self.preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.preview.setPixmap(pix)
+        except Exception as e:
+            print(f"[preview] tick failed: {e!r}", flush=True)
 
     def _poll_keys(self):
         if self.isActiveWindow():
