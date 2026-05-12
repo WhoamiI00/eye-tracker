@@ -2,57 +2,72 @@
   GazeOverlay  -  Hotkey Reference
 ================================================================
 
-GLOBAL HOTKEYS (work even while a game is focused)
+GLOBAL HOTKEYS (work even while a game / browser is focused)
 ----------------------------------------------------------------
-  F2   Toggle CLICK-TO-CORRECT mode (10 sec window)
-       While ON, every real mouse click teaches the tracker
-       "the user was looking near here". Use it to fix drift
-       without redoing the full calibration.
-  F8   Toggle overlay visibility (hide / show the gaze dot)
+  F2   F2 BURST: 10 seconds of high-weight click-to-correct.
+       Every click during this window is treated as a strong
+       "user was looking here" signal. Use right after calibration
+       to refine quickly, or any time accuracy drops noticeably.
+
+  F3   Toggle CONTINUOUS CALIBRATION on/off.
+       Default is ON after calibration completes. Every real
+       mouse click is treated as a potential calibration sample.
+       Look for the floating +1 at each accepted click; faint x
+       means rejected (gaze was elsewhere or unstable). Press F3
+       to pause learning if you want the tracker to freeze.
+
+  F8   Toggle overlay visibility (hide / show the gaze dot).
   F9   Start / stop session recording  ->  saves to sessions\
-  F10  Quit the app
-  F11  Recalibrate from scratch (re-opens calibration)
+  F10  Quit the app.
+  F11  Recalibrate from scratch (re-opens calibration window).
 
 
 CALIBRATION WINDOW
 ----------------------------------------------------------------
-  C    Lock eye spheres (look at the screen center first)
+  C    Lock eye spheres (look at the screen center first).
 
-  After clicking 'Lock eye spheres', a fullscreen 9-point
-  sequence runs (~15 seconds). Just follow the green dot with
-  your eyes and keep your head still.
+  After clicking 'Lock eye spheres', a fullscreen 9-point sequence
+  runs (~15 seconds). Just follow the green dot with your eyes
+  and keep your head still. These 9 points become "anchors" that
+  protect the model from being warped by bad clicks later.
 
-  If you've calibrated before, the 'Use saved calibration'
-  button skips the 9-point sequence and reuses the model.
+  If you've calibrated before, the 'Use saved calibration' button
+  skips the 9-point sequence and reuses the saved model.
+
+
+HOW CONTINUOUS LEARNING WORKS
+----------------------------------------------------------------
+While the overlay is running, every real mouse click anywhere on
+the primary monitor is a potential calibration sample. The system
+uses it only if ALL of these are true:
+  - your face is visible to the webcam
+  - your gaze has been stable (a fixation) for ~250 ms
+  - your gaze is within ~500 px of where you clicked
+  - the click is on the primary monitor
+
+When accepted -> green '+1' floats up at the click position.
+When rejected -> faint 'x' (gaze was elsewhere, or unstable).
+
+Samples are binned by screen region (4x3 grid, max 8 per bin LRU)
+so one corner can't dominate the fit. Anchors from the 9-point
+calibration are never evicted. Outliers are pruned periodically.
+
+The saved model auto-updates as you use the app:
+  C:\Users\<you>\.gaze_overlay_calibration.json
+Delete that file (or press F11) to start fresh.
 
 
 TYPICAL SESSION FLOW
 ----------------------------------------------------------------
   1. Launch GazeOverlay.exe
   2. Look at the screen center, click 'Lock eye spheres' (or C)
-  3. Follow the green dot for 9 points
-  4. (Optional) F2 then click on a few UI elements to refine
-  5. Switch to your game (Borderless Windowed)
-  6. F9 to start recording
-  7. Play
-  8. F9 again to save the CSV
-  9. F10 to quit
-
-
-WHY THE NEW CALIBRATION
-----------------------------------------------------------------
-The old version mapped gaze with one calibration point and
-hardcoded "screen spans 25 deg horizontally" constants. That
-caused everything to drift the more you looked away from
-center.
-
-The new version fits a polynomial across 9 points (least squares
-solve), so each part of the screen gets its own correction.
-Click-to-correct (F2) keeps refining the fit while you use it.
-
-Saved calibration is kept at:
-  C:\Users\<you>\.gaze_overlay_calibration.json
-Delete that file (or press F11) to start fresh.
+  3. Follow the green dot for 9 points (~15 sec)
+  4. Use your computer normally -- browse, play, anything.
+     Each accepted click shows a +1, and accuracy gradually
+     improves over the first few minutes.
+  5. (Optional) F9 to start a session recording
+  6. (Optional) F2 if you want a fast refinement burst
+  7. F10 to quit -- the refined model auto-saves
 
 
 WHERE FILES ARE STORED
@@ -62,7 +77,8 @@ WHERE FILES ARE STORED
     app.log                                <- diagnostic log
 
   In your user folder:
-    .gaze_overlay_calibration.json         <- saved 9-point fit
+    .gaze_overlay_calibration.json         <- model + samples
+                                              (auto-updates as you click)
 
   CSV columns:
     timestamp, screen_x, screen_y, yaw_deg, pitch_deg,
@@ -85,19 +101,29 @@ VIEWING A SESSION REPORT
 
 TIPS
 ----------------------------------------------------------------
+  - Continuous learning works best during normal browsing/gaming
+    where you naturally look at things you click on. It rejects
+    clicks where your eyes were already elsewhere (closing modals,
+    muscle-memory clicks, etc.).
+  - If accuracy is great in one screen area and bad in another,
+    just look + click in the bad area a few times. The per-bin
+    LRU keeps regional samples balanced.
+  - If the tracker starts behaving worse over time (rare; bad
+    lighting, partial face), press F11 for a fresh calibration --
+    that wipes the click history.
   - Fullscreen-EXCLUSIVE games hide overlays. Switch the game to
     Borderless Windowed (or Windowed) in its video settings.
-  - Webcam tracking accuracy is ~1-2 degrees even with the new
-    9-point fit. Good for awareness, not for FPS aim.
-  - Keep your head reasonably still after calibration. If drift
-    becomes obvious, hit F2 and click on a few items, or F11 to
-    redo the full calibration.
-  - Status badge at top-left tells you what is happening:
-      "Calibrated  (F2 = click-to-correct)" = working
-      "Click-to-correct ON (10s) ..."       = F2 mode active
-      "Calibrate first  (see window)"       = run calibration
-      "No face detected"                    = move into webcam view
-      "Recording -> ..."                    = saving samples
+  - Webcam tracking accuracy is ~1-2 degrees. Good for awareness
+    and slow inputs, NOT for FPS aim.
+  - Status badge (top-left) tells you what is happening:
+      "Tracking  (learning +N)"      = working, learned N samples
+      "Tracking"                     = working
+      "Continuous calibration: ON"   = F3 just toggled on
+      "Continuous calibration: PAUSED (F3)" = learning is off
+      "F2 burst ON (10s) ..."        = F2 burst mode active
+      "Calibrate first  (see window)" = run calibration
+      "No face detected"             = move into webcam view
+      "Recording -> ..."             = saving samples to CSV
   - If anything goes wrong, check app.log next to the .exe.
 
 ================================================================
