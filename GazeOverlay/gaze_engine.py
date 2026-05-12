@@ -98,7 +98,7 @@ class GazeEngine:
         screen_h: int,
         on_sample: Callable[[GazeSample], None],
         camera_index: int = 0,
-        filter_length: int = 10,
+        filter_length: int = 18,   # was 10; more averaging on raw gaze direction
         model: Optional[CalibrationModel] = None,
     ):
         self.screen_w = screen_w
