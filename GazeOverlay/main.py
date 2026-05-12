@@ -38,6 +38,7 @@ from metrics import MetricsLogger, summarize
 from overlay import GazeOverlay
 from calibration import CalibrationModel
 from calibration_window import NinePointCalibration
+from continuous_calibration import ContinuousCalibrator, ClickVerdict
 
 
 def _app_dir() -> Path:
@@ -207,6 +208,7 @@ class AppController(QObject):
     """Coordinates engine, overlay, calibration window, and hotkeys."""
 
     sample_signal = pyqtSignal(object)   # GazeSample (queued, thread-safe)
+    click_signal = pyqtSignal(int, int)  # mouse click coord on main thread
 
     def __init__(self):
         super().__init__()
@@ -239,16 +241,27 @@ class AppController(QObject):
 
         self.nine_point: NinePointCalibration = None  # created lazily
 
-        # Click-to-correct state
+        # F2 burst click-to-correct state
         self._click_correct_active = False
         self._click_correct_until = 0.0
-        self._mouse_listener = None
+        self._mouse_listener = None     # pynput listener, started LAZILY after calibration
+
+        # Continuous (always-on) calibration. Listener is NOT started yet —
+        # we wait until after calibration completes to avoid running pynput's
+        # low-level mouse hook concurrently with OpenCV's webcam init, which
+        # has been observed to interact badly on some Windows machines.
+        self.continuous = ContinuousCalibrator(
+            self.engine.model, sw, sh,
+            on_accept=self._on_continuous_accept,
+            on_reject=self._on_continuous_reject,
+        )
 
         self.recording = False
         self.logger: MetricsLogger = None
         self.current_csv: Path = None
 
         self.sample_signal.connect(self._on_sample_main, type=Qt.ConnectionType.QueuedConnection)
+        self.click_signal.connect(self._on_click_main, type=Qt.ConnectionType.QueuedConnection)
 
         # Engine starts immediately; user calibrates via the window.
         self.engine.start()
@@ -276,11 +289,22 @@ class AppController(QObject):
     def _on_sample_main(self, sample: GazeSample):
         if sample.face_visible and sample.calibrated:
             self.overlay.update_gaze(sample.screen_x, sample.screen_y)
-            self.overlay.set_status("Tracking", "#00ff88")
+            n = getattr(self.overlay, "_learn_count", 0)
+            if self.continuous.enabled and n:
+                self.overlay.set_status(f"Tracking  (learning +{n})", "#00ff88")
+            else:
+                self.overlay.set_status("Tracking", "#00ff88")
         elif sample.face_visible and not sample.calibrated:
             self.overlay.set_status("Calibrate first  (see window)", "#ffaa00")
         else:
             self.overlay.set_status("No face detected", "#ff5577")
+
+        # Feed the continuous calibrator's fixation buffer (cheap, early-exits
+        # if not calibrated).
+        self.continuous.feed_sample(
+            sample.timestamp, sample.screen_x, sample.screen_y,
+            sample.yaw_deg, sample.pitch_deg, sample.calibrated,
+        )
 
         if self.recording and self.logger is not None:
             try:
@@ -288,6 +312,33 @@ class AppController(QObject):
             except Exception as e:
                 _log(f"add_sample failed: {e!r}", exc=True)
                 self.overlay.set_status("Logger error — see log", "#ff5577")
+
+    # ---- continuous calibration callbacks ----
+
+    def _on_continuous_accept(self, v: ClickVerdict):
+        self.overlay.show_learn_event(v.mx, v.my, "accept")
+        if v.refit_ran:
+            try:
+                self.engine.model.save()
+            except Exception as e:
+                _log(f"continuous save failed: {e!r}")
+
+    def _on_continuous_reject(self, v: ClickVerdict):
+        if v.reason not in ("disabled", "off-screen", "not calibrated yet"):
+            self.overlay.show_learn_event(v.mx, v.my, "reject")
+
+    def _on_click_main(self, mx: int, my: int):
+        """Main-thread click handler. Coords are already logical pixels."""
+        if self._click_correct_active:
+            # F2 burst takes priority — uses higher weight, no gating
+            yaw, pitch = self.engine.latest_angles()
+            self.engine.model.add_click_correction(mx, my, yaw, pitch)
+            if self.engine.model.fit():
+                self.engine.model.save()
+                self.overlay.show_learn_event(mx, my, "accept")
+            return
+        # Otherwise let continuous-calibration gate it
+        self.continuous.on_click(mx, my)
 
     def _poll_hotkeys(self):
         now = time.time()
@@ -304,16 +355,25 @@ class AppController(QObject):
                 pass
 
         fire('f2',  self._toggle_click_correct)
+        fire('f3',  self._toggle_continuous)
         fire('f8',  self._toggle_overlay)
         fire('f9',  self._toggle_recording)
         fire('f10', self._quit)
         fire('f11', self._show_calibration)
 
-        # Auto-disable click-correct after timeout even without a click
+        # Auto-disable F2 burst after timeout
         if self._click_correct_active and now > self._click_correct_until:
             self._click_correct_active = False
-            self._stop_mouse_listener()
-            self.overlay.set_status("Click-to-correct timed out", "#cccccc")
+            self.overlay.set_status("F2 burst timed out", "#cccccc")
+
+    def _toggle_continuous(self):
+        new = not self.continuous.enabled
+        self.continuous.set_enabled(new)
+        if new:
+            self.overlay.set_status("Continuous calibration: ON", "#00ff88")
+        else:
+            self.overlay.set_status("Continuous calibration: PAUSED (F3)", "#cccccc")
+        _log(f"Continuous calibration {'enabled' if new else 'disabled'}")
 
     def _toggle_overlay(self):
         if self.overlay.isVisible():
@@ -386,7 +446,10 @@ class AppController(QObject):
         if success:
             self.engine.model.save()
             _log(f"9-point calibration done; saved {len(self.engine.model.samples)} samples")
-            self.overlay.set_status("Calibrated  (F2 = click-to-correct)", "#00ff88")
+            self.overlay.set_status("Calibrated  (learning from your clicks)", "#00ff88")
+            # NOW start the global click listener — calibration is done, the
+            # webcam is settled, no contention.
+            self._start_global_click_listener()
         else:
             _log("9-point calibration failed or cancelled")
             self.overlay.set_status("Calibration cancelled — F11 to retry", "#ff5577")
@@ -398,65 +461,56 @@ class AppController(QObject):
         self.engine.request_eye_calibration()
         QTimer.singleShot(250, self.calib_window.hide_for_9point)
         QTimer.singleShot(300, lambda: self.overlay.set_status(
-            "Using saved calibration  (F2 = click-to-correct)", "#00ff88"))
+            "Using saved calibration  (learning from your clicks)", "#00ff88"))
+        QTimer.singleShot(400, self._start_global_click_listener)
         _log("Reused saved calibration model")
 
     # ---- click-to-correct ----
 
     def _toggle_click_correct(self):
-        """F2: enable click-to-correct mode for ~10 seconds. While active,
-        any real mouse click adds a high-weight calibration sample at the
-        click position. Refits the model on each click."""
+        """F2: 10-second burst mode. Clicks are weighted higher than
+        continuous samples. The global click listener does the actual
+        routing — F2 just flips a flag in _on_click_main."""
         if self._click_correct_active:
             self._click_correct_active = False
-            self._stop_mouse_listener()
-            self.overlay.set_status("Click-to-correct OFF", "#cccccc")
+            self.overlay.set_status("F2 burst OFF", "#cccccc")
             return
         if not self.engine.is_calibrated:
             self.overlay.set_status("Calibrate first (F11)", "#ff5577")
             return
         self._click_correct_active = True
         self._click_correct_until = time.time() + 10.0
-        self.overlay.set_status("Click-to-correct ON (10s) — click where you're looking", "#00ddff")
-        self._start_mouse_listener()
+        self.overlay.set_status("F2 burst ON (10s) — click where you're looking", "#00ddff")
 
-    def _start_mouse_listener(self):
-        # Lazy-import pynput so it's only loaded if user actually uses this feature
+    def _start_global_click_listener(self):
+        """Start the always-on pynput mouse hook. Idempotent — safe to
+        call from multiple post-calibration paths. Started LAZILY (not at
+        app launch) to avoid the engine-starve we observed when pynput's
+        low-level hook ran during webcam init."""
+        if self._mouse_listener is not None:
+            return
         try:
             from pynput import mouse  # type: ignore
         except ImportError:
-            self.overlay.set_status("Click-to-correct needs `pip install pynput`", "#ff5577")
-            self._click_correct_active = False
-            _log("pynput not installed — click-to-correct unavailable")
+            _log("pynput not installed — continuous calibration disabled. "
+                 "pip install pynput to enable.")
+            self.continuous.set_enabled(False)
             return
 
         def on_click(x, y, button, pressed):
-            if not pressed or not self._click_correct_active:
+            if not pressed:
                 return
-            if time.time() > self._click_correct_until:
-                # Auto-disable after timeout
-                self._click_correct_active = False
-                self._stop_mouse_listener()
-                return
-            # pynput on Windows reports PHYSICAL pixel coords. The rest of
-            # the app (model, overlay) lives in Qt LOGICAL pixels. Convert
-            # at this one boundary so the F2 click sample lands at the
-            # right screen position (matters on 125%/150% displays).
+            # pynput on Windows reports PHYSICAL pixel coords. Convert to
+            # logical pixels here at the single boundary.
             lx = int(x / self._dpr)
             ly = int(y / self._dpr)
-            yaw, pitch = self.engine.latest_angles()
-            self.engine.model.add_click_correction(lx, ly, yaw, pitch)
-            ok = self.engine.model.fit()
-            if ok:
-                self.engine.model.save()
-                _log(f"Click-correct: ({lx},{ly}) yaw={yaw:.2f} pitch={pitch:.2f} -> refit ok")
-            else:
-                _log(f"Click-correct: refit failed")
+            self.click_signal.emit(lx, ly)
 
         self._mouse_listener = mouse.Listener(on_click=on_click)
         self._mouse_listener.start()
+        _log("Global click listener started")
 
-    def _stop_mouse_listener(self):
+    def _stop_global_click_listener(self):
         if self._mouse_listener is not None:
             try:
                 self._mouse_listener.stop()
@@ -468,7 +522,7 @@ class AppController(QObject):
         if self.recording and self.logger:
             stats = self.logger.close()
             print(f"[Auto-saved on quit] {self.current_csv}")
-        self._stop_mouse_listener()
+        self._stop_global_click_listener()
         if self.engine.model.is_fitted:
             self.engine.model.save()
         self.engine.stop()
